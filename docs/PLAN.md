@@ -61,36 +61,49 @@ they are the second and third surfaces, not the first.
 | Token plane | Ships in alpha, in full |
 | Personhood | Optional viewer tier — priced, not mandated |
 | Repo | `Baronvonbonbon/broadside`, public, GPL-3.0-or-later |
-| Viewer identity | The Polkadot App's own identity sandbox. Broadside invents no linkage. |
+| Viewer identity | A per-product burner derived from host entropy. The platform's own alias does not exist, and its `getUserId` is a *global* handle — see the correction below. |
 
 ## The identity architecture
 
 This is the part that decides whether the product is possible, so it is stated before the phases.
 
-**Broadside never sees the viewer's connected account.** Three host primitives do the work, and
-Broadside adds nothing on top:
+> **Corrected 2026-08-04 by the Phase 1 device run.** This section previously claimed the platform
+> provides cross-product unlinkability. It does not. See
+> [`phase1-seam-report.md`](phase1-seam-report.md) gate 2.
 
-1. **Ring VRF anonymous alias** (`app.wallet.getAnonymousAlias()`) is the viewer's pseudonym. The
-   host scopes it per Product, so a viewer inside `ascend.dot` and the same viewer inside
-   `tavern.dot` are unlinkable *by the platform's design*, not by a Broadside convention.
-2. **The signing key is an app-local secp256k1 burner** derived via `deriveEntropy()` under a
+**Broadside never sees the viewer's connected account.** Two host primitives do the work, and the
+third one the plan expected does not exist:
+
+1. **The signing key is an app-local secp256k1 burner** derived via `deriveEntropy()` under a
    Broadside domain separator. This is not an optimization — it is forced. The host signs sr25519 and
    **cannot produce an `ecrecover`-able signature**, and `AutoSigning` reports `NotAvailable` on both
    Android and iOS wallets, so every host-routed signature needs a user tap. An ad network cannot
-   tap-sign per impression. Because `deriveEntropy` is deterministic, the burner regenerates from
-   nothing — no seed, no backup, no export.
-3. **Payout lands on a product account** (`getProductAccount(productId, index)`), which yields
-   distinct keys per index.
+   tap-sign per impression. Because `deriveEntropy` is deterministic — **measured, across a full app
+   restart** — the burner regenerates from nothing: no seed, no backup, no export.
+2. **Payout lands on a product account** (`getProductAccount(productId, index)`), which yields
+   distinct keys per index — **measured**, four indices, four distinct keys.
+3. ~~**Ring VRF anonymous alias**~~ — `getAnonymousAlias()` returns **null**. The primitive is not
+   there.
+
+**The unlinkability is ours, not the platform's.** `getUserId()` returns a stable, human-readable,
+*global* username (`primaryUsername`), readable by any Product and identical across all of them. So a
+viewer inside `ascend.dot` and the same viewer inside `tavern.dot` are trivially linkable by anyone
+who asks. What holds is narrower and still sufficient: `deriveEntropy` is **product-scoped**, so
+Broadside's viewer address in one Product is unrelated to its address in another. That is a real
+guarantee — but it is a property of Broadside's construction, and it survives only as long as
+`getUserId` never leaves the device. Treat it as key material, not as telemetry.
 
 The consequence is honest and worth stating plainly: **anonymous earnings fragment per publisher.**
 There is no cross-publisher viewer reputation and no global rate limit, which is precisely where ad
 fraud lives. That is what the **optional personhood tier** buys back — a viewer who presents a
 personhood credential gets one payout address, a global rate limit, and access to the premium
 inventory advertisers pay more for. Anonymous viewers keep PoW + per-campaign nullifiers and accept
-fragmentation. Privacy becomes a priced choice rather than a mandate, and the two tiers are two
-settlement paths rather than two protocols.
+fragmentation.
 
-**Three facts this rests on are not yet measured.** They are Phase 1's entire job.
+The device run made that trade concrete rather than theoretical: `primaryUsername` is *exactly* what
+a global rate limit would key on. Using it buys Sybil resistance across publishers and spends the
+privacy claim to buy it. The tier boundary is therefore not a UI preference — it is the boundary
+where that one call becomes permissible.
 
 ## Repo shape
 
@@ -154,14 +167,19 @@ until republished.
       `bafybeifqyvii2d…`, owned by `0xff54a5a1…`. See [`DEPLOY.md`](DEPLOY.md)
 - [ ] part 2 of the report — the host side, from a device run **← the only thing left**
 
-**Gate** — all five must be true:
-- [ ] `deriveEntropy` is deterministic *in a published bundle*, not just in dev
-- [ ] `getAnonymousAlias()` is **stable per product** across calls and sessions. Fresh-per-call means
-      it cannot be a pseudonym, and the tiering design changes
-- [ ] `getProductAccount` returns distinct keys per index
-- [ ] The host provider reaches the chain and returns correct read data
-- [ ] A burner-signed EIP-712 payload is accepted by a PolkaVM contract's `ecrecover`, end to end,
-      from inside the app — **contract half proven**, host half open
+**Gate** — measured on a Pixel 10 Pro XL across two sessions, 2026-08-04:
+- [x] `deriveEntropy` is deterministic *in a published bundle* — same burner
+      `0xC9dbB624…` before and after a full app close
+- [ ] ~~`getAnonymousAlias()` is stable per product~~ — **the call returns null; the primitive does
+      not exist.** `getUserId()` returns a global username instead, which is the opposite property.
+      See the identity correction above
+- [x] `getProductAccount` returns distinct keys per index — 4 indices, 4 distinct keys
+- [ ] The host provider reaches the chain — **no**: `Chain 0xbf0488db… is not supported by the
+      current host`. An external RPC *is* reachable from inside the WebView (823 ms), so this splits
+      into "can read at all" (yes) and "host-routed" (no on this build)
+- [ ] A burner-signed EIP-712 payload survives on-chain `ecrecover` — contract half proven from Node,
+      host half **unanswered because of a probe bug**: `contractRead` depended on the host transport
+      and skipped with it, though the control path could have answered. Fixed in suite 1.1.0
 
 Gates 1 and 2 need **two runs** with a full app restart between them: within one session a cached
 value and a stable one are indistinguishable, so the first run records a baseline in the host's
@@ -170,7 +188,12 @@ rather than guessing.
 
 **Risk** — highest in the plan, which is why it is first and small. **Parallel with:** Phase 2.
 
-### Findings so far
+### Findings
+
+**The device run landed.** Gates 1 and 3 pass; gate 2 found the primitive absent and something worse
+in its place; gate 4 found the host cannot serve the chain, but an external RPC works from inside the
+WebView. Gate 5 was lost to a dependency bug in the probe. Full detail and the resulting corrections
+are in [`phase1-seam-report.md`](phase1-seam-report.md) part 2.
 
 **A PolkaVM contract accepts an off-chain EIP-712 signature, and the gasless relay pattern works.**
 An account with zero balance signed a `Seam`; a different account submitted `attest` and paid; the
@@ -472,9 +495,10 @@ this inherits).
 
 | Unknown | Blocks | Fallback if unfavourable |
 |---|---|---|
-| Is `getAnonymousAlias()` stable per product, or fresh per call? | Phase 1 | Fresh-per-call means no pseudonym. Fall back to a burner-address-derived pseudonym scoped per product — same unlinkability, worse: it is Broadside's convention rather than a platform guarantee. |
-| Does `getUserId()` exist and return something stable? | Phase 1, personhood tier | Without it, the verified tier needs its own registry contract keyed by personhood credential. |
-| Can the host provider reach pallet-revive on Paseo Asset Hub? | everything | Fall back to `pine-rpc` (smoldot light client, already written) or a hosted `eth-rpc` endpoint — at the cost of the host's censorship story. |
+| ~~Is `getAnonymousAlias()` stable per product?~~ | — | **Answered: it returns null.** The fallback is now the design — the per-product derived burner *is* the pseudonym. Same unlinkability, but Broadside's convention rather than a platform guarantee. |
+| ~~Does `getUserId()` exist and return something stable?~~ | — | **Answered: yes, and it is a global username.** Not a capability to build on — a hazard to quarantine. It is also the only thing a global rate limit could key on, which is the anonymous/verified tier boundary. |
+| ~~Can the host provider reach pallet-revive?~~ | — | **Answered: not for `paseo-asset-hub` on this build.** An external `eth-rpc` endpoint *is* reachable from inside the WebView. `pine-rpc` remains the option that keeps verification without the host. |
+| **Which chains does this host build carry?** | Phase 2 deploy target | New, and now the sharp one. Suite 1.1.0 sweeps all eight descriptors. If the answer is `devnet-asset-hub` only, contracts move there for a host-routed path — or stay on 420420417 and accept an external RPC. |
 | Does `cdm` accept EVM bytecode, or is PolkaVM mandatory? | Phase 2 | Either way Broadside targets PolkaVM, so this only affects whether an EVM escape hatch exists. |
 | Bulletin retention is ~2 weeks | Phase 4 onward | The `.dot` bundle needs a renewal keeper. FARE reached the same conclusion (`POLKADOT-PLATFORM-PLAN.md` §4.6). |
 | Kusama Shield pool availability and its 5 known bugs | Phase 6 | Phase 6 is already last, and the interim posture is a plain UI warning. |

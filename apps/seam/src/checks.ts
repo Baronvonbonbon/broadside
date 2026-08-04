@@ -8,9 +8,8 @@
  */
 
 import { createApp, isInsideContainerSync } from "@parity/product-sdk";
-import { getAccountsProvider, getTruApi, toHex } from "@parity/product-sdk-host";
+import { getAccountsProvider, getTruApi, isChainSupported, toHex } from "@parity/product-sdk-host";
 import type { App } from "@parity/product-sdk";
-import { PASEO_NEXT_V2_ASSET_HUB } from "@parity/truapi";
 import { Wallet } from "ethers";
 
 import {
@@ -22,6 +21,7 @@ import {
 } from "../product.mjs";
 import { deriveBurner, hostEntropy, keyFromEntropy } from "./burner";
 import { HostRpc, ethCall, ethChainId, type Hex } from "./chain";
+import { ASSET_HUBS, KNOWN_CHAINS } from "./chains";
 import type { Baseline } from "./memory";
 import {
   CONTRACT_ADDRESS,
@@ -34,9 +34,6 @@ import {
   signSeam,
 } from "./seam";
 import { absent, bad, ok, skipped, type Check, type Ctx } from "./types";
-
-/** The chain the host itself names. Imported, not guessed — Paseo has moved once already. */
-const CHAIN = PASEO_NEXT_V2_ASSET_HUB;
 
 /** neverthrow → the plain tagged shape. AccountsProvider uses it; the top-level wrappers do not. */
 async function nt<T, E>(r: {
@@ -323,8 +320,8 @@ const productAccounts: Check = {
 
 const userId: Check = {
   id: "account.userId",
-  title: "getUserId",
-  why: "A stable per-user handle is what the personhood tier would key a global rate limit on. Whether one exists at all decides if that tier needs its own registry contract.",
+  title: "getUserId — and what it costs to use",
+  why: "Run 1 returned a human-readable global username. That is not a per-product pseudonym: any Product can read the same handle, so using it anywhere would link a viewer across every publisher at once. It is reported as a hazard, not a feature.",
   gates: [],
   needs: ["host.handshake"],
   timeoutMs: 30_000,
@@ -333,29 +330,103 @@ const userId: Check = {
     if (!provider) return absent("getAccountsProvider() returned null.", "host-returned-null");
     const r = await nt(provider.getUserId());
     if (!r.ok) return absent(`getUserId errored: ${msg(r.error)}`, "not-implemented");
-    const value = JSON.stringify(r.value);
-    ctx.shared.userId = value;
-    return ok("Returned a user id.", { shape: value.length > 80 ? `${value.slice(0, 80)}…` : value, length: value.length });
+
+    const value = r.value as Record<string, unknown> | null;
+    const username = typeof value?.primaryUsername === "string" ? value.primaryUsername : null;
+    ctx.shared.userId = JSON.stringify(value);
+
+    // Deliberately does NOT record the username itself. This report is meant to
+    // be shared, and publishing the reporter's global handle beside their burner
+    // address would hand any reader the exact correlation the design exists to
+    // prevent — in a document arguing that the correlation is hard.
+    const data = {
+      fields: value ? Object.keys(value) : [],
+      hasGlobalUsername: Boolean(username),
+      usernameLength: username?.length ?? 0,
+    };
+
+    if (!username) {
+      return ok("Returned an id with no global username field.", data);
+    }
+    return {
+      status: "pass" as const,
+      detail:
+        "A stable, human-readable, GLOBAL username is readable by any Product. The platform therefore does not provide cross-product unlinkability on its own — Broadside's comes from the per-product derived burner, and only holds as long as this value never leaves the device. It is exactly what a global rate limit would need, which is the trade: using it buys Sybil resistance and spends the privacy claim.",
+      data,
+    };
   },
 };
 
 // ── gate 4: can the host reach a contract ───────────────────────────────────
 
+const hostSupports: Check = {
+  id: "chain.hostSupports",
+  title: "Which chains does this host build actually carry?",
+  why: "Run 1 asked for the only Asset Hub truapi names and got 'not supported'. The descriptors package ships eight chains and a host build carries a subset — which one decides where Broadside's contracts have to live.",
+  gates: [],
+  needs: ["host.handshake"],
+  timeoutMs: 60_000,
+  async run(ctx) {
+    const supported: string[] = [];
+    const unsupported: string[] = [];
+    const errors: Record<string, string> = {};
+
+    for (const chain of KNOWN_CHAINS) {
+      const r = await isChainSupported(chain.genesis);
+      if (!r.ok) {
+        errors[chain.descriptor] = msg(r.error);
+        continue;
+      }
+      (r.value ? supported : unsupported).push(chain.descriptor);
+    }
+
+    // Only an Asset Hub can hold a pallet-revive contract, so that is the
+    // subset that decides anything.
+    const hubs = ASSET_HUBS.filter((c) => supported.includes(c.descriptor));
+    ctx.shared.supportedHubs = hubs;
+    const data = { supported, unsupported, errors, supportedAssetHubs: hubs.map((h) => h.descriptor) };
+
+    if (!supported.length) {
+      return bad(
+        "The host reports no known chain as supported. Either isChainSupported is not implemented on this build, or the descriptor genesis hashes have drifted.",
+        "chain-not-supported",
+        data,
+      );
+    }
+    if (!hubs.length) {
+      return bad(
+        `Carries ${supported.join(", ")} but no Asset Hub. A pallet-revive contract cannot be reached through this host at all.`,
+        "chain-not-supported",
+        data,
+      );
+    }
+    return ok(`Carries ${supported.length} of ${KNOWN_CHAINS.length}; usable Asset Hub: ${hubs.map((h) => h.name).join(", ")}.`, data);
+  },
+};
+
 const hostTransport: Check = {
   id: "chain.hostTransport",
   title: "Host provider — what does the transport actually speak?",
   why: "getHostProvider returns polkadot-api's JsonRpcProvider, a Substrate transport. Whether it also answers eth_* decides whether the widget can talk to pallet-revive directly or needs a translation layer.",
-  gates: ["chainReachable"],
-  needs: ["host.container"],
+  gates: ["hostRouted"],
+  needs: ["chain.hostSupports"],
   timeoutMs: 45_000,
   async run(ctx) {
+    // Ask for an Asset Hub the host said it carries, rather than the one this
+    // probe would prefer. Run 1 did the opposite and learned nothing about the
+    // transport, only about the chain list.
+    const hubs = (ctx.shared.supportedHubs ?? []) as typeof ASSET_HUBS;
+    const target = hubs[0];
+    if (!target) return skipped("No supported Asset Hub to open a provider against.", "chain-not-supported");
+
     let rpc: HostRpc | null;
     try {
-      rpc = await HostRpc.open(CHAIN.genesis as Hex);
+      rpc = await HostRpc.open(target.genesis as Hex);
     } catch (e) {
-      return bad(`getHostProvider threw: ${msg(e)}`, "chain-not-supported", { chain: CHAIN.name, genesis: CHAIN.genesis });
+      return bad(`getHostProvider threw: ${msg(e)}`, "chain-not-supported", { chain: target.name, genesis: target.genesis });
     }
-    if (!rpc) return absent("getHostProvider() returned null for this chain.", "host-returned-null", { chain: CHAIN.name });
+    if (!rpc) return absent("getHostProvider() returned null for this chain.", "host-returned-null", { chain: target.name });
+    ctx.shared.hostChain = target;
 
     ctx.shared.hostRpc = rpc;
 
@@ -374,10 +445,10 @@ const hostTransport: Check = {
     const revive = list.filter((m) => /revive/i.test(m));
 
     const data = {
-      chain: CHAIN.name,
-      genesisAsked: CHAIN.genesis,
+      chain: target.name,
+      genesisAsked: target.genesis,
       genesisReported: genesis.ok ? String(genesis.result) : null,
-      genesisMatches: genesis.ok && String(genesis.result).toLowerCase() === CHAIN.genesis.toLowerCase(),
+      genesisMatches: genesis.ok && String(genesis.result).toLowerCase() === target.genesis.toLowerCase(),
       methodCount: list.length,
       ethMethods: eth,
       reviveMethods: revive,
@@ -435,7 +506,12 @@ const contractRead: Check = {
   title: "Read the deployed contract",
   why: "Proves the address holds code on the chain the signature will be bound to. A domain separator built against the wrong chain id produces signatures that are valid-looking and never match.",
   gates: ["chainReachable"],
-  needs: ["chain.hostTransport"],
+  // Deliberately depends on nothing. Run 1 gated this on chain.hostTransport,
+  // so when the host could not serve the chain this skipped — and took gate 5
+  // with it — even though the control path was working and could have answered
+  // it. A check that can succeed by another route must not inherit the failure
+  // of the route it did not need.
+  needs: [],
   timeoutMs: 45_000,
   async run(ctx) {
     if (!CONTRACT_ADDRESS) {
@@ -615,6 +691,7 @@ export const CHECKS: Check[] = [
   aliasCrossSession,
   productAccounts,
   userId,
+  hostSupports,
   hostTransport,
   controlRpc,
   contractRead,
@@ -623,5 +700,4 @@ export const CHECKS: Check[] = [
   attestWrite,
 ];
 
-export { CHAIN };
 export type { Ctx };

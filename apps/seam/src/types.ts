@@ -54,12 +54,22 @@ export interface Finding {
   ms?: number;
 }
 
-/** The five questions Phase 1 exists to answer. Each maps to one or more findings. */
+/**
+ * The questions Phase 1 exists to answer.
+ *
+ * Gate 4 was one question until run 1 answered it "no" and made the ambiguity
+ * obvious: "the host provider reaches the chain" conflates *can a Product read
+ * a contract at all* with *can it do so without an external endpoint*. The first
+ * decides whether Broadside ships; the second decides whether it inherits the
+ * host's censorship-resistance. Run 1 found those two have different answers, so
+ * they are now different gates.
+ */
 export const GATES = {
   entropyDeterministic: "deriveEntropy is deterministic in a published bundle",
   aliasStable: "getAnonymousAlias is stable per product",
   accountsDistinct: "getProductAccount yields distinct keys per index",
-  chainReachable: "the host provider reaches the chain and reads correctly",
+  chainReachable: "a Product can read the deployed contract from inside the app",
+  hostRouted: "…through the host's own provider, with no external endpoint",
   recoverAccepted: "a burner-signed EIP-712 payload survives on-chain ecrecover",
 } as const;
 

@@ -15,7 +15,6 @@
  */
 
 import { PRODUCT_ID, SOURCE_URL, SUITE_VERSION } from "../product.mjs";
-import { CHAIN } from "./checks";
 import { CONTRACT_ADDRESS, CONTRACT_CHAIN_ID, CONTRACT_TARGET } from "./seam";
 import { GATES, type Finding, type GateId, type Status } from "./types";
 import { CHECKS } from "./checks";
@@ -38,9 +37,10 @@ export interface Report {
     baselineStore: string;
     baselineRecordedAt: string | null;
   };
+  /** The contract under test. Which chain the *host* carries is discovered per
+   *  run and lives in `chain.hostSupports`, not here — it is a property of the
+   *  host build, not of this deployment. */
   target: {
-    chainName: string;
-    genesis: string;
     contract: string;
     contractChainId: number | null;
     contractTarget: string | null;
@@ -60,8 +60,6 @@ export function build(findings: Finding[], surface: Report["surface"]): Report {
     ranAt: new Date().toISOString(),
     surface,
     target: {
-      chainName: CHAIN.name,
-      genesis: CHAIN.genesis,
       contract: CONTRACT_ADDRESS || "(not deployed)",
       contractChainId: CONTRACT_CHAIN_ID,
       contractTarget: CONTRACT_TARGET,
@@ -143,7 +141,7 @@ export function toMarkdown(r: Report): string {
   L.push(`- suite \`${r.suite}\` ${r.suiteVersion}, build \`${r.buildId}\``);
   L.push(`- product \`${r.productId}\`, ran ${r.ranAt}`);
   L.push(`- surface: ${r.surface.inContainer ? "**Polkadot App**" : "plain browser / gateway"} — \`${r.surface.userAgent}\``);
-  L.push(`- target: ${r.target.chainName} \`${r.target.genesis.slice(0, 14)}…\`, contract \`${r.target.contract}\``);
+  L.push(`- contract: \`${r.target.contract}\` (${r.target.contractTarget ?? "?"}) on chain ${r.target.contractChainId ?? "?"}`);
   L.push(`- source: ${r.source}`, "");
 
   L.push(`## Gates`, "");
