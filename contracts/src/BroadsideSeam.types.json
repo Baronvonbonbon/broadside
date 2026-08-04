@@ -1,0 +1,15 @@
+{
+  "_comment": "EIP-712 definition for BroadsideSeam. The build embeds this in the artifact so the app reads it from the same place it reads the ABI, and contracts/test/seam.test.mjs asserts it against the typehash literals in BroadsideSeam.sol. There is deliberately no second copy to drift from.",
+  "domain": {
+    "name": "BroadsideSeam",
+    "version": "1"
+  },
+  "primaryType": "Seam",
+  "types": {
+    "Seam": [
+      { "name": "viewer", "type": "address" },
+      { "name": "nonce", "type": "uint256" },
+      { "name": "note", "type": "bytes32" }
+    ]
+  }
+}

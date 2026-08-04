@@ -1,0 +1,143 @@
+/* Phone first — this runs on a device held by someone who did not write it.
+   Both themes, because the host carries a theme and a probe that fights it
+   looks broken before it has said anything. */
+
+:root {
+  color-scheme: dark light;
+  --bg: #0e1116;
+  --panel: #161b22;
+  --line: #262d38;
+  --fg: #e6edf3;
+  --dim: #8b98a5;
+  --pass: #3fb950;
+  --fail: #f85149;
+  --warn: #d29922;
+  --skip: #6e7681;
+  --accent: #58a6ff;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff;
+    --panel: #f6f8fa;
+    --line: #d8dee4;
+    --fg: #1f2328;
+    --dim: #636c76;
+    --skip: #8c959f;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+#app { max-width: 46rem; margin: 0 auto; }
+
+h1 { margin: 0; font-size: 1.6rem; letter-spacing: -0.02em; }
+h2 { margin: 1.75rem 0 0.5rem; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); }
+.sub { margin: 0.4rem 0 0.9rem; color: var(--dim); }
+
+.meta { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0 0 1.25rem; font-size: 0.82rem; }
+.meta dt { color: var(--dim); }
+.meta dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+
+.run {
+  width: 100%;
+  padding: 0.9rem;
+  font: inherit;
+  font-weight: 600;
+  color: var(--bg);
+  background: var(--accent);
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.run:disabled { opacity: 0.65; cursor: default; }
+
+.note { color: var(--dim); font-size: 0.85rem; }
+
+.gates { margin-top: 1.5rem; }
+.gate {
+  display: grid;
+  grid-template-columns: 1.5rem 1fr auto;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  background: var(--panel);
+}
+.gate .q { font-size: 0.9rem; }
+.gate .v { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dim); }
+.gate.pass .mark { color: var(--pass); }
+.gate.fail .mark { color: var(--fail); }
+.gate.unanswered .mark { color: var(--warn); }
+
+.actions { display: flex; gap: 8px; margin-top: 1rem; }
+.actions button {
+  flex: 1;
+  padding: 0.65rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--fg);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.findings { list-style: none; margin: 0; padding: 0; }
+.finding {
+  padding: 0.7rem 0.75rem;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  background: var(--panel);
+}
+.finding.pass { border-left-color: var(--pass); }
+.finding.fail { border-left-color: var(--fail); }
+.finding.unsupported, .finding.blocked { border-left-color: var(--warn); }
+.finding.skip { border-left-color: var(--skip); }
+
+.head { display: grid; grid-template-columns: 1.25rem 1fr; gap: 0.5rem; align-items: baseline; }
+.head .title { font-weight: 600; font-size: 0.92rem; }
+.head .status {
+  grid-column: 2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  color: var(--dim);
+}
+.finding.pass .mark { color: var(--pass); }
+.finding.fail .mark { color: var(--fail); }
+.finding.unsupported .mark, .finding.blocked .mark { color: var(--warn); }
+.finding.skip .mark { color: var(--skip); }
+
+.detail { margin: 0.5rem 0 0 1.75rem; font-size: 0.86rem; color: var(--fg); }
+
+details { margin: 0.5rem 0 0 1.75rem; }
+summary { cursor: pointer; font-size: 0.75rem; color: var(--dim); }
+pre {
+  overflow-x: auto;
+  margin: 0.4rem 0 0;
+  padding: 0.6rem;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.caveats ul { margin: 0; padding-left: 1.1rem; }
+.caveats li { margin-bottom: 0.4rem; font-size: 0.85rem; color: var(--dim); }
+
+footer { margin-top: 2rem; font-size: 0.75rem; }
+footer a { color: var(--dim); word-break: break-all; }

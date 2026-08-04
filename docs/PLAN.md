@@ -6,7 +6,7 @@
 | Phase | | Status |
 |---|---|---|
 | 0 | PolkaVM size survey | ✅ done — [`phase0-pvm-size-report.md`](phase0-pvm-size-report.md) |
-| 1 | The seam probe | ⬜ not started |
+| 1 | The seam probe | 🟡 built — needs a deploy and a device run |
 | 2 | Contracts: the alpha spine on PolkaVM | ⬜ not started |
 | 3 | Core widget and settlement services | ⬜ not started |
 | 4 | First Product publisher | ⬜ not started |
@@ -130,33 +130,64 @@ drift is exactly what this repo exists to end.
 
 ---
 
-## Phase 1 — The seam probe ⬜
+## Phase 1 — The seam probe 🟡
 
-**The riskiest assumption, tested first, in ~200 lines.** Everything downstream assumes a Product
-inside the Polkadot App WebView can derive a burner, sign EIP-712 with it, and reach a PolkaVM
-contract through the host's provider. Nobody has done that. `sonde` proves the pieces separately —
-`host.account.eip712` signs and recovers, `host.chain.provider` constructs a provider — but no probe
-closes the loop, and sonde's published bundle carries a `PRODUCT_ID` mismatch that makes every Bank B
-answer a false "no" until republished.
+**The riskiest assumption, tested first.** Everything downstream assumes a Product inside the
+Polkadot App WebView can derive a burner, sign EIP-712 with it, and reach a PolkaVM contract through
+the host's provider. Nobody has done that. `sonde` proves the pieces separately — `host.account.eip712`
+signs and recovers, `host.chain.provider` constructs a provider — but no probe closes the loop, and
+sonde's published bundle carries a `PRODUCT_ID` mismatch that makes every Bank B answer a false "no"
+until republished.
 
 **Produces**
-- [ ] `apps/seam/` — a Product that derives a burner via `deriveEntropy("broadside/v1/…")`, calls
-      `getAnonymousAlias()` twice, calls `getProductAccount(id, [0,1,2,7])`, calls `getUserId()`,
-      constructs a host provider for Paseo Asset Hub, and `eth_call`s + writes to a trivial deployed
-      PolkaVM contract, checking the receipt
-- [ ] `contracts/BroadsideSeam.sol` — ~30 lines, one `ecrecover`-gated setter
-- [ ] `docs/phase1-seam-report.md` — the answers, machine-diffable
+- [x] `apps/seam/` — 16 checks in dependency order, each bounded, mapping onto the five gates.
+      See [`apps/seam/README.md`](../apps/seam/README.md)
+- [x] `contracts/src/BroadsideSeam.sol` — EIP-712 `recover` as a **view** call, so the load-bearing
+      check costs nothing and runs on an unfunded device; `attest` proves the same thing with a receipt
+- [x] toolchain: `tools/fetch-toolchain.sh` (pinned + checksum-verified solc and resolc),
+      `contracts/scripts/build.mjs` (both targets), `contracts/scripts/deploy.mjs`
+- [x] drift guards: `sync-abi.mjs --check`, `check-identity.mjs`, 9 contract tests
+- [ ] `BroadsideSeam` deployed — needs `DEPLOYER_KEY` and a funded account
+- [ ] `docs/phase1-seam-report.md` — the answers, produced by a device run
 
 **Gate** — all five must be true:
 - [ ] `deriveEntropy` is deterministic *in a published bundle*, not just in dev
 - [ ] `getAnonymousAlias()` is **stable per product** across calls and sessions. Fresh-per-call means
       it cannot be a pseudonym, and the tiering design changes
 - [ ] `getProductAccount` returns distinct keys per index
-- [ ] The host provider reaches Paseo Asset Hub and returns correct `eth_call` data
+- [ ] The host provider reaches the chain and returns correct read data
 - [ ] A burner-signed EIP-712 payload is accepted by a PolkaVM contract's `ecrecover`, end to end,
       from inside the app
 
+Gates 1 and 2 need **two runs** with a full app restart between them: within one session a cached
+value and a stable one are indistinguishable, so the first run records a baseline in the host's
+per-product store and the second compares against it. The probe reports `unanswered` until then
+rather than guessing.
+
 **Risk** — highest in the plan, which is why it is first and small. **Parallel with:** Phase 2.
+
+### Findings so far
+
+Two came out of building it, before any device run:
+
+**`getHostProvider` returns polkadot-api's `JsonRpcProvider`, not ethers'.** It is a Substrate
+transport over `truApi.chain.*`, so `eth_call` is not obviously something it can do. The probe asks
+the transport for `rpc_methods` and reports what it actually speaks rather than assuming. If it does
+not answer `eth_*`, every contract read needs a translation layer — `pine-rpc` already implements
+exactly that, `eth_*` over `ReviveApi_*` — or an external endpoint, which gives up the host's
+censorship story. This was already the top row of the external-unknowns table; it is now known to be
+the sharp version of that question.
+
+**The host names only two chains, and neither is Paseo Asset Hub.** `@parity/truapi` ships exactly
+`PASEO_NEXT_V2_ASSET_HUB` (`0xbf0488db…`) and `PASEO_NEXT_V2_INDIVIDUALITY` (`0xc5af1826…`). DATUM and
+FARE deploy to Paseo Asset Hub via `eth-rpc-testnet.polkadot.io`, chain id 420420417 — a different
+chain. **If contracts are not on a chain the host carries, the widget cannot reach them through the
+host at all**, which would force the external-endpoint fallback from day one. The probe imports these
+constants rather than hardcoding a hash, so it measures the answer instead of assuming it. Worth
+noting that the second one is the *personhood* chain, which the optional viewer tier will need.
+
+This may change the "Chain: Paseo Asset Hub" decision. Deciding before the probe runs would be
+guessing; the probe exists to make it a measurement.
 
 ---
 

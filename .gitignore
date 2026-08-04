@@ -22,3 +22,8 @@ tools/*.log
 coverage/
 *.tsbuildinfo
 .DS_Store
+tools/solc
+
+# Contract build output. The client-facing slice is generated into
+# apps/seam/src/generated/ and committed; the bytecode is not.
+contracts/out/

@@ -1,0 +1,303 @@
+{
+  "_generated": "apps/seam/scripts/sync-abi.mjs — do not edit; run the script",
+  "contract": "BroadsideSeam",
+  "solc": "Version: 0.8.24+commit.e11b9ed9.Linux.g++",
+  "resolc": "Solidity frontend for the revive compiler version 1.4.0+commit.ca3c770.llvm-22.1.5",
+  "target": null,
+  "address": "",
+  "chainId": null,
+  "rpc": "",
+  "eip712": {
+    "_comment": "EIP-712 definition for BroadsideSeam. The build embeds this in the artifact so the app reads it from the same place it reads the ABI, and contracts/test/seam.test.mjs asserts it against the typehash literals in BroadsideSeam.sol. There is deliberately no second copy to drift from.",
+    "domain": {
+      "name": "BroadsideSeam",
+      "version": "1"
+    },
+    "primaryType": "Seam",
+    "types": {
+      "Seam": [
+        {
+          "name": "viewer",
+          "type": "address"
+        },
+        {
+          "name": "nonce",
+          "type": "uint256"
+        },
+        {
+          "name": "note",
+          "type": "bytes32"
+        }
+      ]
+    }
+  },
+  "abi": [
+    {
+      "inputs": [
+        {
+          "internalType": "uint8",
+          "name": "v",
+          "type": "uint8"
+        }
+      ],
+      "name": "BadRecoveryId",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "length",
+          "type": "uint256"
+        }
+      ],
+      "name": "BadSignatureLength",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "MalleableSignature",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "RecoveryFailed",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "given",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "have",
+          "type": "uint256"
+        }
+      ],
+      "name": "StaleNonce",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "recovered",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "claimed",
+          "type": "address"
+        }
+      ],
+      "name": "ViewerMismatch",
+      "type": "error"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "viewer",
+          "type": "address"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "nonce",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "bytes32",
+          "name": "note",
+          "type": "bytes32"
+        },
+        {
+          "indexed": false,
+          "internalType": "address",
+          "name": "submitter",
+          "type": "address"
+        }
+      ],
+      "name": "Attested",
+      "type": "event"
+    },
+    {
+      "inputs": [
+        {
+          "components": [
+            {
+              "internalType": "address",
+              "name": "viewer",
+              "type": "address"
+            },
+            {
+              "internalType": "uint256",
+              "name": "nonce",
+              "type": "uint256"
+            },
+            {
+              "internalType": "bytes32",
+              "name": "note",
+              "type": "bytes32"
+            }
+          ],
+          "internalType": "struct BroadsideSeam.Seam",
+          "name": "s",
+          "type": "tuple"
+        },
+        {
+          "internalType": "bytes",
+          "name": "sig",
+          "type": "bytes"
+        }
+      ],
+      "name": "attest",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "name": "attestationOf",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "nonce",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "note",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "uint256",
+          "name": "blockNumber",
+          "type": "uint256"
+        },
+        {
+          "internalType": "address",
+          "name": "submitter",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "chainId",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "domainSeparator",
+      "outputs": [
+        {
+          "internalType": "bytes32",
+          "name": "",
+          "type": "bytes32"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "components": [
+            {
+              "internalType": "address",
+              "name": "viewer",
+              "type": "address"
+            },
+            {
+              "internalType": "uint256",
+              "name": "nonce",
+              "type": "uint256"
+            },
+            {
+              "internalType": "bytes32",
+              "name": "note",
+              "type": "bytes32"
+            }
+          ],
+          "internalType": "struct BroadsideSeam.Seam",
+          "name": "s",
+          "type": "tuple"
+        }
+      ],
+      "name": "hashSeam",
+      "outputs": [
+        {
+          "internalType": "bytes32",
+          "name": "",
+          "type": "bytes32"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "components": [
+            {
+              "internalType": "address",
+              "name": "viewer",
+              "type": "address"
+            },
+            {
+              "internalType": "uint256",
+              "name": "nonce",
+              "type": "uint256"
+            },
+            {
+              "internalType": "bytes32",
+              "name": "note",
+              "type": "bytes32"
+            }
+          ],
+          "internalType": "struct BroadsideSeam.Seam",
+          "name": "s",
+          "type": "tuple"
+        },
+        {
+          "internalType": "bytes",
+          "name": "sig",
+          "type": "bytes"
+        }
+      ],
+      "name": "recover",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    }
+  ]
+}

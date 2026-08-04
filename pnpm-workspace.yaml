@@ -3,3 +3,11 @@ packages:
   - "apps/*"
   - "services/*"
   - "contracts"
+
+# pnpm blocks dependency install scripts by default, which is the right default
+# — an install script is arbitrary code from a transitive dependency. esbuild is
+# allowed by name because vite cannot run without it: its script links the
+# platform-native binary, and without that the bundler is a no-op that fails at
+# first build. Anything added here should need the same kind of justification.
+allowBuilds:
+  esbuild: true

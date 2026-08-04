@@ -1,0 +1,26 @@
+{
+  "name": "@broadside/seam",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Phase 1 seam probe — can a key derived inside the Polkadot App sign something a PolkaVM contract accepts?",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview --host",
+    "sync-abi": "node scripts/sync-abi.mjs",
+    "check-identity": "node scripts/check-identity.mjs"
+  },
+  "dependencies": {
+    "@parity/product-sdk": "^0.20.0",
+    "@parity/product-sdk-host": "^0.15.0",
+    "@parity/truapi": "^0.6.0",
+    "ethers": "^6.17.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0"
+  }
+}
