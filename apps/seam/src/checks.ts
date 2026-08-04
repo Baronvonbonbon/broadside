@@ -16,6 +16,7 @@ import {
   CLOUD_ENV,
   ENTROPY_LABEL,
   ENTROPY_LABEL_ALT,
+  DOT_NAME,
   ETH_RPC_URL,
   PRODUCT_ID,
 } from "../product.mjs";
@@ -221,10 +222,10 @@ const entropyCrossSession: Check = {
 // ── gate 2: alias stability ─────────────────────────────────────────────────
 
 const aliasInSession: Check = {
-  id: "alias.inSession",
-  title: "Ring VRF anonymous alias — stable across calls",
-  why: "This is the viewer's pseudonym and the one primitive that does not link a user across products. Fresh per call means it cannot identify a returning viewer at all, and the tiering design changes.",
-  gates: ["aliasStable"],
+  id: "alias.deprecatedWalletCall",
+  title: "app.wallet.getAnonymousAlias() — the deprecated path",
+  why: "Kept as a data point, not a gate. Runs 1–4 read its null return as 'the Ring VRF alias does not exist', which was wrong — the alias lives on AccountsProvider. Recording both makes the deprecation visible instead of inferring an absence from it.",
+  gates: [],
   needs: ["host.createApp"],
   timeoutMs: 30_000,
   async run(ctx) {
@@ -238,9 +239,12 @@ const aliasInSession: Check = {
     } catch (e) {
       return bad(`getAnonymousAlias threw: ${msg(e)}`, "threw");
     }
-    if (first == null) return absent("getAnonymousAlias() returned null — no alias in this runtime.", "host-returned-null");
-
-    ctx.shared.alias = first;
+    if (first == null) {
+      return absent(
+        "Returns null. Not evidence that the alias is unavailable — see alias.productAccountAlias, which is the supported surface.",
+        "host-returned-null",
+      );
+    }
     const stable = first === second;
     const data = { alias: first, stableAcrossCalls: stable };
     return stable
@@ -253,12 +257,111 @@ const aliasInSession: Check = {
   },
 };
 
+/**
+ * The alias, asked for correctly.
+ *
+ * Runs 1–4 concluded "the Ring VRF alias does not exist" from
+ * `app.wallet.getAnonymousAlias()` returning null. That was the wrong surface.
+ * `AccountsProvider.getProductAccountAlias(context, ringLocation)` is the real
+ * API — on the same object this probe already uses for `getProductAccount` and
+ * `getUserId`, and present in the installed SDK all along.
+ *
+ * It needs a ring to derive against, and the host does not publish one, so the
+ * candidates are swept and every error reported verbatim. The error type earns
+ * that: `RingNotFound` means the location is wrong, `NotMember` means the
+ * location is *right* and this user is not enrolled in the ring — which is the
+ * personhood question, and a completely different answer.
+ */
+const productAlias: Check = {
+  id: "alias.productAccountAlias",
+  title: "Ring VRF alias — getProductAccountAlias",
+  why: "This is the viewer pseudonym the plan was built on. Whether it exists, and whether it is stable per product, decides if unlinkability is a platform guarantee or purely Broadside's own construction.",
+  gates: ["aliasStable"],
+  needs: ["host.handshake"],
+  timeoutMs: 60_000,
+  async run(ctx) {
+    const provider = await getAccountsProvider();
+    if (!provider) return absent("getAccountsProvider() returned null.", "host-returned-null");
+    if (typeof provider.getProductAccountAlias !== "function") {
+      return absent("This SDK build has no getProductAccountAlias.", "not-implemented");
+    }
+
+    // The doc comment says productId is the dotNS identifier "e.g. my-product.dot",
+    // but getProductAccount accepts the bare label and works. Try both rather
+    // than pick — a wrong productId and a wrong ring fail differently and the
+    // error text is what tells them apart.
+    const ringChains = KNOWN_CHAINS.filter((c) => c.kind === "individuality" || c.descriptor === "devnet-asset-hub");
+    const attempts: Record<string, string> = {};
+    let alias: string | null = null;
+    let winner = "";
+
+    outer: for (const productId of [DOT_NAME, PRODUCT_ID]) {
+      for (const chain of ringChains) {
+        const label = `${productId} @ ${chain.descriptor}`;
+        const r = await nt(
+          provider.getProductAccountAlias(
+            { productId, suffix: { tag: "Left", value: 0 } },
+            { chainId: chain.genesis, junctions: [] },
+          ),
+        );
+        if (r.ok) {
+          const value = r.value as { alias?: unknown; context?: unknown };
+          alias = typeof value.alias === "string" ? value.alias : toHex(value.alias as Uint8Array);
+          attempts[label] = `ok — alias ${alias.slice(0, 18)}…`;
+          winner = label;
+          break outer;
+        }
+        attempts[label] = msg(r.error);
+      }
+    }
+
+    const data = { attempts, tried: Object.keys(attempts).length };
+    if (!alias) {
+      const text = Object.values(attempts).join(" | ");
+      // NotMember is not a failure of the API — it is an answer about the user.
+      if (/NotMember/i.test(text)) {
+        return absent(
+          "The ring exists but this user is not a member. The alias is gated on ring enrolment — which is the personhood question, not an API gap.",
+          "not-implemented",
+          data,
+        );
+      }
+      return absent(
+        "No candidate ring produced an alias. The host does not publish a ring location, so this swept the individuality chains and the Asset Hub with an empty junction path; a correct location would need documenting rather than guessing.",
+        "not-implemented",
+        data,
+      );
+    }
+
+    ctx.shared.alias = alias;
+    // Called twice: within-session stability is the cheap half of the question.
+    const second = await nt(
+      provider.getProductAccountAlias(
+        { productId: winner.startsWith(DOT_NAME) ? DOT_NAME : PRODUCT_ID, suffix: { tag: "Left", value: 0 } },
+        { chainId: ringChains.find((c) => winner.endsWith(c.descriptor))!.genesis, junctions: [] },
+      ),
+    );
+    const secondAlias = second.ok
+      ? ((second.value as { alias?: unknown }).alias as string) ?? null
+      : null;
+    const stable = secondAlias === alias;
+
+    return stable
+      ? ok(`Alias derived and stable across calls, via ${winner}.`, { ...data, alias, stableAcrossCalls: true })
+      : bad(
+          "Fresh on every call. Unlinkable, but it cannot serve as a pseudonym the product remembers.",
+          "fresh-per-call",
+          { ...data, first: alias, second: secondAlias },
+        );
+  },
+};
+
 const aliasCrossSession: Check = {
   id: "alias.crossSession",
   title: "Alias stability across sessions",
   why: "Same reasoning as the entropy baseline: within one session a cached value and a stable one are indistinguishable.",
   gates: ["aliasStable"],
-  needs: ["alias.inSession"],
+  needs: ["alias.productAccountAlias"],
   async run(ctx) {
     const baseline = ctx.shared.baseline as Baseline | null;
     const alias = ctx.shared.alias as string | undefined;
@@ -788,6 +891,7 @@ export const CHECKS: Check[] = [
   burner,
   entropyCrossSession,
   aliasInSession,
+  productAlias,
   aliasCrossSession,
   productAccounts,
   userId,

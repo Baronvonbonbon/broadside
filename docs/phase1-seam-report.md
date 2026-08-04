@@ -55,7 +55,48 @@ This is the load-bearing one. The key is regenerated from the host on demand —
 no export, nothing for a viewer to lose. It survives a restart, which is the claim a single session
 could not have distinguished from a cache.
 
-### Gate 2 — there is no Ring VRF alias, and something worse is there instead
+### Gate 2 — reopened: the alias exists, the probe asked the wrong object
+
+> **Correction.** Runs 1–4 concluded *"the Ring VRF alias does not exist in this runtime"* from
+> `app.wallet.getAnonymousAlias()` returning `null`. That call is the **deprecated** surface. The
+> supported one is `AccountsProvider.getProductAccountAlias(context, ringLocation)` — on the very
+> object this probe already used for `getProductAccount` and `getUserId`, and present in the
+> installed `@parity/product-sdk-host@0.15.0` the whole time.
+>
+> A `null` from a deprecated method is not evidence of an absent capability, and treating it as such
+> is the same mistake as reading a descriptor name as a chain identity. Gate 2 is **unanswered**, not
+> failed, until 1.4.0 runs.
+
+The new call needs a ring to derive against:
+
+```ts
+getProductAccountAlias(
+  { productId, suffix: { tag: "Left", value: 0 } },      // ProductProofContext
+  { chainId: <genesis>, junctions: [] },                  // RingLocation
+): ResultAsync<ContextualAlias, …>                        // { context, alias }
+```
+
+The host publishes no ring location, so 1.4.0 sweeps candidates — both `productId` spellings
+(`broadside.dot` and `broadside`) against the individuality chains and the Asset Hub — and reports
+every error verbatim. The error type makes that worth doing, because its variants are not
+interchangeable:
+
+| variant | meaning |
+|---|---|
+| `RingNotFound` | wrong location — keep looking |
+| `NotMember` | **right location, this user is not enrolled in the ring** — the personhood question, not an API gap |
+| `Rejected` | user or host declined |
+| `Unknown { reason }` | anything else, carried through verbatim |
+
+`NotMember` would be the most interesting outcome: it would mean the alias is real and gated on
+personhood enrolment, which is precisely the anonymous-vs-verified tier boundary arriving as a
+platform mechanism rather than one we have to build.
+
+**What does not change:** `getUserId()` still returns a global username, and that finding stands on
+its own measurement. Whatever the alias turns out to be, a Product can still identify a user by
+handle, so unlinkability still depends on Broadside declining to make that call.
+
+### Gate 2, as first read — no Ring VRF alias, and something worse in its place
 
 `getAnonymousAlias()` returned **null**. The primitive the plan named as the viewer's pseudonym does
 not exist in this runtime.

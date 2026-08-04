@@ -82,8 +82,11 @@ third one the plan expected does not exist:
    restart** — the burner regenerates from nothing: no seed, no backup, no export.
 2. **Payout lands on a product account** (`getProductAccount(productId, index)`), which yields
    distinct keys per index — **measured**, four indices, four distinct keys.
-3. ~~**Ring VRF anonymous alias**~~ — `getAnonymousAlias()` returns **null**. The primitive is not
-   there.
+3. **Ring VRF alias — reopened.** `app.wallet.getAnonymousAlias()` returns `null`, but that call is
+   *deprecated*. The supported surface is `AccountsProvider.getProductAccountAlias(context,
+   ringLocation)`, which has been in the installed SDK all along. Whether it yields a stable
+   per-product pseudonym is unanswered until suite 1.4.0 runs — the earlier "the primitive is not
+   there" was inferred from the wrong object.
 
 **The unlinkability is ours, not the platform's.** `getUserId()` returns a stable, human-readable,
 *global* username (`primaryUsername`), readable by any Product and identical across all of them. So a
@@ -531,7 +534,7 @@ this inherits).
 
 | Unknown | Blocks | Fallback if unfavourable |
 |---|---|---|
-| ~~Is `getAnonymousAlias()` stable per product?~~ | — | **Answered: it returns null.** The fallback is now the design — the per-product derived burner *is* the pseudonym. Same unlinkability, but Broadside's convention rather than a platform guarantee. |
+| **Does `getProductAccountAlias` yield a stable per-product alias, and against which ring?** | the identity model | Reopened — `getAnonymousAlias()` is the deprecated call, and its `null` proved nothing. Suite 1.4.0 sweeps ring locations. `NotMember` would mean the alias is real and gated on personhood enrolment, making the tier boundary a platform mechanism instead of one we build. If no ring resolves, the per-product derived burner remains the pseudonym — Broadside's construction, as today. |
 | ~~Does `getUserId()` exist and return something stable?~~ | — | **Answered: yes, and it is a global username.** Not a capability to build on — a hazard to quarantine. It is also the only thing a global rate limit could key on, which is the anonymous/verified tier boundary. |
 | ~~Can the host provider reach pallet-revive?~~ | — | **Answered: not for `paseo-asset-hub` on this build.** An external `eth-rpc` endpoint *is* reachable from inside the WebView. `pine-rpc` remains the option that keeps verification without the host. |
 | ~~Which chains does this host build carry?~~ | — | **Answered: `devnet-asset-hub`, and nothing else** — but that descriptor *is* Paseo Asset Hub, so the host carries exactly the chain our contracts are on. The first reading of this, that the contracts were stranded, was wrong; see the correction in the report. |
