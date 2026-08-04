@@ -150,8 +150,9 @@ until republished.
 - [x] `BroadsideSeam` deployed — `0xbcb6C034923130b66E7596E778d6D56c283a77B7`, chain 420420417,
       native PolkaVM (15,932 bytes), verified by `contracts/scripts/verify-seam.mjs --write`
 - [x] [`phase1-seam-report.md`](phase1-seam-report.md) part 1 — the chain side
-- [ ] `broadside.dot` registered — blocked on `pad login`, which needs a phone
-- [ ] part 2 of the report — the host side, from a device run
+- [x] `broadside.dot` registered and published — <https://broadside.dev-dot.li>, CID
+      `bafybeifqyvii2d…`, owned by `0xff54a5a1…`. See [`DEPLOY.md`](DEPLOY.md)
+- [ ] part 2 of the report — the host side, from a device run **← the only thing left**
 
 **Gate** — all five must be true:
 - [ ] `deriveEntropy` is deterministic *in a published bundle*, not just in dev
@@ -483,7 +484,9 @@ this inherits).
 
 - **Token name and symbol.** DATUM/WDATUM has no obvious Broadside analogue and the symbol is
   ABI-facing, so it wants deciding before Phase 5 rather than during it.
-- **`.dot` label for the viewer Product.** Registration is 11 PAS, on-chain, and permanent. Note
-  `pad` has no read-only availability check and **registers any name the signer is eligible for** —
-  running it speculatively cost the `sonde` project 33 PAS in three accidental names. Use
-  `sonde/tools/whoowns.sh` to check a label without claiming it.
+- ~~**`.dot` label for the viewer Product.**~~ **Settled** — `broadside.dot` is registered and owned
+  by `0xff54a5a1…`. Two assumptions it contradicted are recorded in [`DEPLOY.md`](DEPLOY.md): a
+  9-character label was not personhood-gated, and `pad` pays for registration from a funded local
+  worker rather than the signed-in account, so the signer's balance is not the budget. The warning
+  still stands for any *further* names: `pad` has no read-only availability check and registers any
+  name the signer is eligible for.
