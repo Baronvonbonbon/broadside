@@ -71,13 +71,32 @@ async function start(): Promise<void> {
   const list = el("ol", { class: "findings" });
   out.replaceChildren(list);
 
+  // A row for the check that is *about* to run, replaced by its result when it
+  // settles. Without it the only thing on screen during a stall is a count of
+  // completed checks, which names everything except the one that is stuck.
+  let pending: HTMLElement | null = null;
+
   const shared: Record<string, unknown> = { baseline };
   const findings = await runAll({
     shared,
-    onProgress(f, i, total) {
+    onStart(check, i, total) {
       button.textContent = `Running… ${i + 1}/${total}`;
-      list.append(renderFinding(f));
-      list.lastElementChild?.scrollIntoView({ block: "nearest" });
+      pending = el("li", { class: "finding running" },
+        el("div", { class: "head" },
+          el("span", { class: "mark" }, "⋯"),
+          el("span", { class: "title" }, check.title),
+          el("span", { class: "status" }, `running · ${check.id}`),
+        ),
+      );
+      list.append(pending);
+      pending.scrollIntoView({ block: "nearest" });
+    },
+    onProgress(f) {
+      const row = renderFinding(f);
+      if (pending) pending.replaceWith(row);
+      else list.append(row);
+      pending = null;
+      row.scrollIntoView({ block: "nearest" });
     },
   });
 

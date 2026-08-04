@@ -476,6 +476,80 @@ const hostTransport: Check = {
   },
 };
 
+const hostMethods: Check = {
+  id: "chain.hostMethods",
+  title: "Which RPC methods does the host allow?",
+  why: "rpc_methods returned nothing and eth_chainId came back 'not supported by the host', so the transport is an allowlist. Whether a runtime-call method is on it decides whether a contract can be read through the host at all, or only through an external endpoint.",
+  gates: [],
+  needs: ["chain.hostTransport"],
+  timeoutMs: 90_000,
+  async run(ctx) {
+    const rpc = ctx.shared.hostRpc as HostRpc | undefined;
+    if (!rpc) return skipped("No host transport open.");
+
+    // Read-only, and each with parameters that cannot succeed. That is the
+    // point: a "method not found" and an "invalid params" are the two answers
+    // worth telling apart, and only the second proves the method exists.
+    const candidates: [string, unknown[]][] = [
+      ["chainSpec_v1_genesisHash", []],
+      ["chainSpec_v1_chainName", []],
+      ["chainSpec_v1_properties", []],
+      // The runtime-call surface. ReviveApi_call rides on one of these, and it
+      // is the whole question for a host-routed contract read.
+      ["state_call", ["ReviveApi_call", "0x"]],
+      ["state_getRuntimeVersion", []],
+      ["state_getMetadata", []],
+      ["archive_v1_call", ["0x", "ReviveApi_call", "0x"]],
+      ["chainHead_v1_call", ["invalid-subscription", "0x", "ReviveApi_call", "0x"]],
+      ["chainHead_v1_storage", ["invalid-subscription", "0x", []]],
+      ["system_chain", []],
+      ["system_health", []],
+      ["system_properties", []],
+      ["transaction_v1_broadcast", ["0x"]],
+      ["author_submitExtrinsic", ["0x"]],
+    ];
+
+    const allowed: string[] = [];
+    const blocked: string[] = [];
+    const detail: Record<string, string> = {};
+
+    for (const [method, params] of candidates) {
+      const r = await rpc.call(method, params);
+      if (r.ok) {
+        allowed.push(method);
+        detail[method] = "ok";
+        continue;
+      }
+      const text = r.error?.message ?? "";
+      // The host's own refusal is phrased distinctively; anything else came
+      // from the node, which means the method reached it.
+      if (/not supported by the host|method not found|unknown method/i.test(text)) {
+        blocked.push(method);
+        detail[method] = "blocked by host";
+      } else {
+        allowed.push(method);
+        detail[method] = `reached the node — ${text.slice(0, 90)}`;
+      }
+    }
+
+    const runtimeCall = allowed.filter((m) => /state_call|archive_v1_call|chainHead_v1_call/.test(m));
+    const data = { allowed, blocked, detail, runtimeCallAvailable: runtimeCall };
+    ctx.shared.runtimeCallAvailable = runtimeCall.length > 0;
+
+    if (!runtimeCall.length) {
+      return bad(
+        `No runtime-call method is reachable (tried state_call, archive_v1_call, chainHead_v1_call). A pallet-revive contract cannot be read through this host at all — reads must go to an external endpoint, and the host's censorship story is not available to Broadside.`,
+        "method-not-found",
+        data,
+      );
+    }
+    return ok(
+      `Runtime calls are reachable via ${runtimeCall.join(", ")}. A host-routed contract read is possible — it needs SCALE-encoded ReviveApi_call, which is what pine-rpc already implements.`,
+      data,
+    );
+  },
+};
+
 const controlRpc: Check = {
   id: "chain.controlRpc",
   title: "External Ethereum RPC — the control",
@@ -512,7 +586,7 @@ const contractRead: Check = {
   // it. A check that can succeed by another route must not inherit the failure
   // of the route it did not need.
   needs: [],
-  timeoutMs: 45_000,
+  timeoutMs: 25_000,
   async run(ctx) {
     if (!CONTRACT_ADDRESS) {
       return skipped(
@@ -598,7 +672,7 @@ const recoverOnChain: Check = {
   why: "The whole gate. A PolkaVM contract recovering the app-local burner from an EIP-712 signature is what makes gasless per-impression claims possible; it is deliberately a view call so it costs nothing and works on an unfunded device.",
   gates: ["recoverAccepted"],
   needs: ["seam.signLocal", "chain.contractRead"],
-  timeoutMs: 45_000,
+  timeoutMs: 25_000,
   async run(ctx) {
     const signed = ctx.shared.signed as { value: { viewer: string; nonce: bigint; note: string }; signature: string; localDigest: string } | undefined;
     const b = ctx.shared.burner as { address: string };
@@ -653,7 +727,7 @@ const attestWrite: Check = {
   why: "A view call proves recovery; a receipt proves the whole path including gas, nonce and inclusion. Needs a funded account, which a probe on a stranger's phone will not have — so it reports what to fund rather than failing.",
   gates: [],
   needs: ["seam.recoverOnChain"],
-  timeoutMs: 120_000,
+  timeoutMs: 20_000,
   async run(ctx) {
     const b = ctx.shared.burner as { address: string };
     if (!ETH_RPC_URL) {
@@ -693,6 +767,7 @@ export const CHECKS: Check[] = [
   userId,
   hostSupports,
   hostTransport,
+  hostMethods,
   controlRpc,
   contractRead,
   signLocal,

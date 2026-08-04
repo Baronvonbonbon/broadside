@@ -90,7 +90,51 @@ arriving earlier and sharper than expected.
 
 Indices 0, 1, 2 and 7 produced four distinct public keys. Per-session payout addresses are derivable.
 
-### Gate 4 — the host does not carry the chain
+### Gate 4 — answered in run 3: the host carries exactly one chain, and it is not ours
+
+Suite 1.1.0 swept all eight descriptors with `isChainSupported`:
+
+| supported | unsupported |
+|---|---|
+| `devnet-asset-hub` | the other seven — including `devnet-bulletin`, `devnet-individuality`, and every Paseo, Kusama and Polkadot chain |
+
+**One of eight.** The transport then opened cleanly against it and round-tripped in 425 ms, with
+`chainSpec_v1_genesisHash` returning `0xd6eec261…` — exactly the descriptor's value, so the chain is
+genuinely there and correctly identified.
+
+Two things follow, and both are decisions rather than observations:
+
+**`BroadsideSeam` is on the wrong chain for a host-routed path.** It is deployed to Paseo Asset Hub
+(420420417). The host does not carry Paseo Asset Hub. A Product on this build cannot reach that
+contract through the host at any price — the fix is deploying to Devnet Asset Hub, not tuning
+anything.
+
+**The host transport does not speak Ethereum RPC.**
+
+```
+eth_chainId → Method "eth_chainId" is not supported by the host
+rpc_methods → 0 methods
+```
+
+`rpc_methods` returning nothing while `chainSpec_v1_genesisHash` works means the host runs an
+**allowlist** and `rpc_methods` is not on it — so the surface cannot be enumerated, only probed. Suite
+1.2.0 therefore tries a candidate list one method at a time and classifies each answer: a refusal
+phrased as *"not supported by the host"* is the host blocking it, and anything else — including an
+invalid-params error — proves the method reached the node. That is the distinction that matters, and
+it is the only way left to find out whether `state_call` / `archive_v1_call` / `chainHead_v1_call`
+are available, which is what a `ReviveApi_call` contract read needs.
+
+**Meanwhile there is a working path today.** The control check reached
+`https://eth-rpc-testnet.polkadot.io/` from inside the WebView in 788 ms. The embedder does not block
+outbound HTTP. So a Product can read pallet-revive right now — just not through the host, and so
+without inheriting the host's censorship-resistance.
+
+One inconsistency worth flagging rather than smoothing over: `createApp({environment:"devnet"})`
+succeeds and reports `cloudStorage: true`, yet `isChainSupported(devnet-bulletin)` says **no**. Cloud
+storage evidently does not go through the same capability check it reports on. Do not treat
+`isChainSupported` as authoritative for anything other than the chain-provider path.
+
+### Gate 4, as first observed in run 2 — the host does not carry the chain
 
 ```
 Chain 0xbf0488db… is not supported by the current host.
@@ -125,6 +169,19 @@ gate was really asking.
 That is why gate 4 is now two gates: **can a Product read the contract at all** (yes, via an external
 endpoint) versus **can it do so with no external endpoint** (not on this build, for this chain).
 Those have different answers and conflating them hid a shippable path behind a failure.
+
+### Run 3 also stalled, and the UI could not say where
+
+The run reached `Running… 14/17` and stopped visibly progressing. That count reports *completed*
+checks, and nothing on screen named the one in flight — so the single most useful fact about a stall
+was the one thing the interface could not show. Every check is bounded, so it would have moved on;
+the defect is that a bounded stall and a hang are indistinguishable to the person watching.
+
+1.2.0 renders a row for each check *before* running it, replaced by the result when it settles, and
+the runner now diagnoses a blown budget as `never-settled` rather than folding it in with call
+failures. Budgets on the network checks came down too — 45 s to 25 s for the contract reads, 120 s to
+20 s for the write, with the transports capped at 12 s inside them — so an unresponsive endpoint
+resolves in a fifth of the time it used to.
 
 ### Gate 5 — unanswered because of a bug in this probe
 

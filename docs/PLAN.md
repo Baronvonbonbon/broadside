@@ -57,7 +57,7 @@ they are the second and third surfaces, not the first.
 | Old repos | `datum`, `datum-labs`, `datum-venture` stay live and untouched. No history import. |
 | Continuity | Clean break. New contracts, new token, new EIP-712 domain. No state migration. |
 | First surface | Polkadot App Product (`.dot`-published bundle) |
-| Chain | Paseo Asset Hub via pallet-revive, PolkaVM target |
+| Chain | ⚠️ **Under review.** Chosen as Paseo Asset Hub; the device run found the host carries only **Devnet Asset Hub**, so a host-routed read needs contracts there instead. Pending the 1.2.0 allowlist probe. |
 | Token plane | Ships in alpha, in full |
 | Personhood | Optional viewer tier — priced, not mandated |
 | Repo | `Baronvonbonbon/broadside`, public, GPL-3.0-or-later |
@@ -498,7 +498,8 @@ this inherits).
 | ~~Is `getAnonymousAlias()` stable per product?~~ | — | **Answered: it returns null.** The fallback is now the design — the per-product derived burner *is* the pseudonym. Same unlinkability, but Broadside's convention rather than a platform guarantee. |
 | ~~Does `getUserId()` exist and return something stable?~~ | — | **Answered: yes, and it is a global username.** Not a capability to build on — a hazard to quarantine. It is also the only thing a global rate limit could key on, which is the anonymous/verified tier boundary. |
 | ~~Can the host provider reach pallet-revive?~~ | — | **Answered: not for `paseo-asset-hub` on this build.** An external `eth-rpc` endpoint *is* reachable from inside the WebView. `pine-rpc` remains the option that keeps verification without the host. |
-| **Which chains does this host build carry?** | Phase 2 deploy target | New, and now the sharp one. Suite 1.1.0 sweeps all eight descriptors. If the answer is `devnet-asset-hub` only, contracts move there for a host-routed path — or stay on 420420417 and accept an external RPC. |
+| ~~Which chains does this host build carry?~~ | — | **Answered: `devnet-asset-hub`, and nothing else.** One of eight. So `BroadsideSeam` on Paseo Asset Hub is unreachable through the host by construction. |
+| **Is a runtime-call method on the host's RPC allowlist?** | Phase 2 deploy target, Phase 3 client | The host blocks `eth_*` and `rpc_methods`, so the surface can only be probed. Suite 1.2.0 tries `state_call` / `archive_v1_call` / `chainHead_v1_call`. **Yes** → deploy to Devnet Asset Hub and read through the host via SCALE-encoded `ReviveApi_call`. **No** → no host-routed read exists at all, and the widget uses an external endpoint or `pine-rpc`, giving up the censorship story. |
 | Does `cdm` accept EVM bytecode, or is PolkaVM mandatory? | Phase 2 | Either way Broadside targets PolkaVM, so this only affects whether an EVM escape hatch exists. |
 | Bulletin retention is ~2 weeks | Phase 4 onward | The `.dot` bundle needs a renewal keeper. FARE reached the same conclusion (`POLKADOT-PLATFORM-PLAN.md` §4.6). |
 | Kusama Shield pool availability and its 5 known bugs | Phase 6 | Phase 6 is already last, and the interim posture is a plain UI warning. |

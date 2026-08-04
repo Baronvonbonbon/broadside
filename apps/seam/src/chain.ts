@@ -43,7 +43,7 @@ export class HostRpc {
 
   private constructor(private readonly timeoutMs: number) {}
 
-  static async open(genesis: Hex, timeoutMs = 15_000): Promise<HostRpc | null> {
+  static async open(genesis: Hex, timeoutMs = 12_000): Promise<HostRpc | null> {
     const provider = await getHostProvider(genesis);
     if (!provider) return null;
     const rpc = new HostRpc(timeoutMs);
@@ -103,7 +103,7 @@ export class HostRpc {
 }
 
 /** The control path: a plain Ethereum RPC, reached by ordinary fetch. */
-export async function ethCall(url: string, to: string, data: string, timeoutMs = 15_000): Promise<RpcResult> {
+export async function ethCall(url: string, to: string, data: string, timeoutMs = 12_000): Promise<RpcResult> {
   const provider = new EthProvider(url, undefined, { staticNetwork: true });
   const t0 = performance.now();
   try {
@@ -116,7 +116,7 @@ export async function ethCall(url: string, to: string, data: string, timeoutMs =
   }
 }
 
-export async function ethChainId(url: string, timeoutMs = 15_000): Promise<RpcResult> {
+export async function ethChainId(url: string, timeoutMs = 12_000): Promise<RpcResult> {
   const provider = new EthProvider(url, undefined, { staticNetwork: true });
   const t0 = performance.now();
   try {

@@ -39,6 +39,7 @@ export type Diagnosis =
   | "network-blocked"
   | "recovery-mismatch"
   | "unfunded"
+  | "never-settled"
   | "threw";
 
 export interface Finding {

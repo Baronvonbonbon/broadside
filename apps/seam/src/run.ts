@@ -14,9 +14,20 @@
 import { CHECKS } from "./checks";
 import type { Check, Ctx, Finding } from "./types";
 
+export { CHECKS };
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 export interface RunOptions {
+  /**
+   * Fired before a check runs.
+   *
+   * Run 3 stalled and the UI could only say "Running… 14/17" — a number that
+   * counts *completed* checks, so the one actually in flight was the one thing
+   * on screen that could not be named. A stall nobody can attribute is a stall
+   * nobody can fix.
+   */
+  onStart?(check: Check, index: number, total: number): void;
   onProgress?(finding: Finding, index: number, total: number): void;
   shared?: Record<string, unknown>;
 }
@@ -27,6 +38,7 @@ export async function runAll(opts: RunOptions = {}): Promise<Finding[]> {
   const findings: Finding[] = [];
 
   for (const [i, check] of CHECKS.entries()) {
+    opts.onStart?.(check, i, CHECKS.length);
     const finding = await runOne(check, { found, shared, signal: new AbortController().signal });
     found.set(finding.id, finding);
     findings.push(finding);
@@ -77,8 +89,8 @@ async function runOne(check: Check, ctx: Ctx): Promise<Finding> {
       resolve({
         ...base,
         status: "fail",
-        detail: `Never settled within ${budget} ms. The call was made and no answer came back — that is a host-side hang, not a slow network.`,
-        diagnosis: "host-call-failed",
+        detail: `Never settled within ${budget} ms. The call was made and no answer came back — that is a hang, not a slow network. Promise.race cannot cancel the losing promise, so it is still pending; the run continued without it.`,
+        diagnosis: "never-settled",
         ms: budget,
       });
     }, budget);

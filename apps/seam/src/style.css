@@ -107,6 +107,14 @@ h2 { margin: 1.75rem 0 0.5rem; font-size: 0.8rem; text-transform: uppercase; let
 .finding.fail { border-left-color: var(--fail); }
 .finding.unsupported, .finding.blocked { border-left-color: var(--warn); }
 .finding.skip { border-left-color: var(--skip); }
+.finding.running { border-left-color: var(--accent); opacity: 0.75; }
+.finding.running .mark { color: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+
+@keyframes pulse { 50% { opacity: 0.25; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .finding.running .mark { animation: none; }
+}
 
 .head { display: grid; grid-template-columns: 1.25rem 1fr; gap: 0.5rem; align-items: baseline; }
 .head .title { font-weight: 600; font-size: 0.92rem; }
