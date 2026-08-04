@@ -130,10 +130,13 @@ designed in:
 | **There is no anonymous read.** An unmapped account cannot perform even a view call — `revive.AccountUnmapped` — and `revive.mapAccount` takes a deposit | Would be severe for a normal dApp. It is not for us: **the viewer is never an origin.** They sign an EIP-712 claim and never author a transaction. One well-known mapped read account serves every view call (a dry-run's origin is not published), and the relay is the only writer. |
 | **EIP-712 keys do not move.** An sr25519 account cannot produce an `ecrecover`-able signature | This is the architecture already. The migration is *transport and payer identity only*; the viewer's derived secp256k1 burner is untouched. |
 
-So the direction is native, and the open question is narrow: **is a runtime-call method on the host's
-allowlist?** If yes, `packages/client` gets a PAPI backend and Broadside keeps the host's
-censorship-resistance. If no, it uses an external endpoint or `pine-rpc` and gives that up — a real
-loss, but not a blocking one.
+**The device run settled it: the host-routed path exists.** `chainHead_v1_call` is allowed — the host
+exposes the new JSON-RPC spec and blocks the legacy `state_*` / `system_*` / `author_*` surface
+entirely. So Broadside can keep the host's censorship-resistance, on one condition: the client must
+drive the chainHead subscription lifecycle, where a call carries a `followSubscription` and its
+result returns as a notification rather than a reply. **PAPI does this; a hand-rolled JSON-RPC client
+cannot.** `packages/client`'s host backend is therefore `app.chain.connect(…)` plus
+`@parity/product-sdk-contracts`, not a bespoke transport.
 
 ## Repo shape
 
@@ -532,7 +535,8 @@ this inherits).
 | ~~Does `getUserId()` exist and return something stable?~~ | — | **Answered: yes, and it is a global username.** Not a capability to build on — a hazard to quarantine. It is also the only thing a global rate limit could key on, which is the anonymous/verified tier boundary. |
 | ~~Can the host provider reach pallet-revive?~~ | — | **Answered: not for `paseo-asset-hub` on this build.** An external `eth-rpc` endpoint *is* reachable from inside the WebView. `pine-rpc` remains the option that keeps verification without the host. |
 | ~~Which chains does this host build carry?~~ | — | **Answered: `devnet-asset-hub`, and nothing else.** One of eight. So `BroadsideSeam` on Paseo Asset Hub is unreachable through the host by construction. |
-| **Is a runtime-call method on the host's RPC allowlist?** | Phase 2 deploy target, Phase 3 client | The host blocks `eth_*` and `rpc_methods`, so the surface can only be probed. Suite 1.2.0 tries `state_call` / `archive_v1_call` / `chainHead_v1_call`. **Yes** → deploy to Devnet Asset Hub and read through the host via SCALE-encoded `ReviveApi_call`. **No** → no host-routed read exists at all, and the widget uses an external endpoint or `pine-rpc`, giving up the censorship story. |
+| ~~Is a runtime-call method on the host's RPC allowlist?~~ | — | **Answered: `chainHead_v1_call` is the one door, and it is open.** The host allows the new JSON-RPC spec (`chainSpec_v1_*`, `chainHead_v1_*`, `transaction_v1_broadcast`) and blocks the legacy surface (`state_*`, `system_*`, `author_*`, `archive_v1_call`) outright. So a host-routed read is possible — but only from a client that drives the chainHead subscription lifecycle, which means **PAPI, not raw JSON-RPC**. |
+| **Does Devnet Asset Hub have an eth-rpc endpoint, or does deployment go native?** | Phase 2 | Contracts must move there for a host-routed path. `deploy.mjs` speaks eth-rpc; if devnet has no such endpoint, deployment needs a PAPI `revive.instantiateWithCode` script. Contract sources are unaffected either way. |
 | Does `cdm` accept EVM bytecode, or is PolkaVM mandatory? | Phase 2 | Either way Broadside targets PolkaVM, so this only affects whether an EVM escape hatch exists. |
 | Bulletin retention is ~2 weeks | Phase 4 onward | The `.dot` bundle needs a renewal keeper. FARE reached the same conclusion (`POLKADOT-PLATFORM-PLAN.md` §4.6). |
 | Kusama Shield pool availability and its 5 known bugs | Phase 6 | Phase 6 is already last, and the interim posture is a plain UI warning. |

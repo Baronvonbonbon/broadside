@@ -27,12 +27,14 @@ export const DOT_NAME = `${PRODUCT_ID}.dot`;
 // a chain a devnet build does not carry, and createApp throws.
 export const CLOUD_ENV = "devnet";
 
+// 1.3.0 — a timeout is no longer reported as "reached the node"; per-attempt
+// timing on the contract read; the in-flight row counts elapsed against budget.
 // 1.2.0 — names the in-flight check so a stall can be attributed; probes the
 // host's RPC allowlist for a runtime-call method, since rpc_methods is blocked.
 // 1.1.0 — sweeps the chains the host actually carries instead of assuming
 // truapi's two; stops gate 5 inheriting the host transport's failure; reports
 // getUserId as a privacy hazard rather than a capability.
-export const SUITE_VERSION = "1.2.0";
+export const SUITE_VERSION = "1.3.0";
 
 export const SOURCE_URL = "https://github.com/Baronvonbonbon/broadside";
 

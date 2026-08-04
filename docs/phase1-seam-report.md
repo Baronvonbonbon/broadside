@@ -170,6 +170,39 @@ That is why gate 4 is now two gates: **can a Product read the contract at all** 
 endpoint) versus **can it do so with no external endpoint** (not on this build, for this chain).
 Those have different answers and conflating them hid a shippable path behind a failure.
 
+### Run 4 — the host allows the modern JSON-RPC spec and blocks the legacy one
+
+| allowed | blocked |
+|---|---|
+| `chainSpec_v1_genesisHash`, `chainSpec_v1_chainName`, `chainSpec_v1_properties`, `transaction_v1_broadcast` | `state_call`, `state_getRuntimeVersion`, `state_getMetadata`, `archive_v1_call`, `system_chain`, `system_health`, `system_properties`, `author_submitExtrinsic` |
+| **not refused, but did not answer:** `chainHead_v1_call`, `chainHead_v1_storage` | |
+
+That is a coherent policy rather than an arbitrary list: the host exposes the **new JSON-RPC spec**
+(`chainSpec_v1_*`, `chainHead_v1_*`, `transaction_v1_*`) and blocks the **legacy** surface
+(`state_*`, `system_*`, `author_*`) entirely. `archive_v1_call` is blocked too, so there is no
+archive path either.
+
+**`chainHead_v1_call` is the only door to a runtime call, and it is not locked.** It did not answer
+this probe because the probe asked wrongly: `chainHead_v1_*` is subscription-based — a call must
+carry a `followSubscription` from `chainHead_v1_follow`, and its *result* arrives as a notification
+rather than as a reply to the request id. The probe's transport correlates by id only, so it cannot
+see one. That is a client-shape problem, not a permission one, and it is exactly the lifecycle PAPI
+implements and `pine-rpc` drives contract reads through
+(`src/transport/ChainManager.ts` → `runOperation("chainHead_v1_call", (subId) => …)`).
+
+`transaction_v1_broadcast` being allowed while `author_submitExtrinsic` is blocked completes the
+picture: the write path exists, on the new spec.
+
+**So Phase 3's client is PAPI, not raw JSON-RPC.** `app.chain.connect(devnet-asset-hub)` plus
+`@parity/product-sdk-contracts`, which is what `ChainApi.getRawClient` documents itself as being for.
+A hand-rolled JSON-RPC client cannot drive this surface no matter how many methods it is allowed.
+
+**A correction to run 4's own evidence.** Suite 1.2.0 classified methods into allowed and blocked,
+and folded a timeout into "reached the node" — so it reported `chainHead_v1_call` as *available* on
+the strength of it never answering. That is a false positive of exactly the kind this probe exists to
+avoid. 1.3.0 separates a third bucket, `noAnswer`, and says plainly that an absent answer is not
+evidence of anything.
+
 ### Run 3 also stalled, and the UI could not say where
 
 The run reached `Running… 14/17` and stopped visibly progressing. That count reports *completed*

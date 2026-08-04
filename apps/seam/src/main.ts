@@ -75,23 +75,36 @@ async function start(): Promise<void> {
   // settles. Without it the only thing on screen during a stall is a count of
   // completed checks, which names everything except the one that is stuck.
   let pending: HTMLElement | null = null;
+  let ticker: number | undefined;
 
   const shared: Record<string, unknown> = { baseline };
   const findings = await runAll({
     shared,
     onStart(check, i, total) {
       button.textContent = `Running… ${i + 1}/${total}`;
+      const status = el("span", { class: "status" }, `running · ${check.id}`);
       pending = el("li", { class: "finding running" },
         el("div", { class: "head" },
           el("span", { class: "mark" }, "⋯"),
           el("span", { class: "title" }, check.title),
-          el("span", { class: "status" }, `running · ${check.id}`),
+          status,
         ),
       );
       list.append(pending);
       pending.scrollIntoView({ block: "nearest" });
+
+      // A count that stands still and a count that climbs are different
+      // situations. Without the elapsed seconds beside the budget, a check
+      // waiting out a 12 s transport timeout looks exactly like a hang.
+      const t0 = performance.now();
+      const budget = Math.round((check.timeoutMs ?? 30_000) / 1000);
+      clearInterval(ticker);
+      ticker = setInterval(() => {
+        status.textContent = `running · ${check.id} · ${Math.round((performance.now() - t0) / 1000)}s / ${budget}s`;
+      }, 500) as unknown as number;
     },
     onProgress(f) {
+      clearInterval(ticker);
       const row = renderFinding(f);
       if (pending) pending.replaceWith(row);
       else list.append(row);
@@ -99,6 +112,7 @@ async function start(): Promise<void> {
       row.scrollIntoView({ block: "nearest" });
     },
   });
+  clearInterval(ticker);
 
   // Record before rendering, so a first run leaves a baseline even if the
   // reader closes the app the moment it finishes.

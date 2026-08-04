@@ -511,21 +511,33 @@ const hostMethods: Check = {
 
     const allowed: string[] = [];
     const blocked: string[] = [];
+    // Three buckets, not two. 1.2.0 had only allowed/blocked and folded a
+    // timeout into "reached the node", which reported chainHead_v1_call as
+    // available on the strength of it never answering. An absent answer is not
+    // evidence of anything and must say so.
+    const noAnswer: string[] = [];
     const detail: Record<string, string> = {};
 
     for (const [method, params] of candidates) {
       const r = await rpc.call(method, params);
       if (r.ok) {
         allowed.push(method);
-        detail[method] = "ok";
+        detail[method] = `ok (${r.ms} ms)`;
         continue;
       }
       const text = r.error?.message ?? "";
-      // The host's own refusal is phrased distinctively; anything else came
-      // from the node, which means the method reached it.
       if (/not supported by the host|method not found|unknown method/i.test(text)) {
         blocked.push(method);
         detail[method] = "blocked by host";
+      } else if (/^no response in/.test(text)) {
+        // Our own timeout, not the node's error. For the chainHead_v1_*
+        // family this is the expected result of asking wrongly rather than a
+        // fault: those methods are the subscription-based spec, where a call
+        // must carry a followSubscription from chainHead_v1_follow and its
+        // *result* arrives as a notification, not as a reply to this id. This
+        // transport correlates by id only, so it cannot see one.
+        noAnswer.push(method);
+        detail[method] = `no answer in ${r.ms} ms — not refused, but not answered`;
       } else {
         allowed.push(method);
         detail[method] = `reached the node — ${text.slice(0, 90)}`;
@@ -533,18 +545,22 @@ const hostMethods: Check = {
     }
 
     const runtimeCall = allowed.filter((m) => /state_call|archive_v1_call|chainHead_v1_call/.test(m));
-    const data = { allowed, blocked, detail, runtimeCallAvailable: runtimeCall };
-    ctx.shared.runtimeCallAvailable = runtimeCall.length > 0;
+    const notRefused = noAnswer.filter((m) => /chainHead_v1_call|archive_v1_call|state_call/.test(m));
+    const data = { allowed, blocked, noAnswer, detail, runtimeCallConfirmed: runtimeCall, runtimeCallNotRefused: notRefused };
+    ctx.shared.runtimeCallAvailable = runtimeCall.length > 0 || notRefused.length > 0;
 
-    if (!runtimeCall.length) {
-      return bad(
-        `No runtime-call method is reachable (tried state_call, archive_v1_call, chainHead_v1_call). A pallet-revive contract cannot be read through this host at all — reads must go to an external endpoint, and the host's censorship story is not available to Broadside.`,
-        "method-not-found",
+    if (runtimeCall.length) {
+      return ok(`Runtime calls confirmed via ${runtimeCall.join(", ")}.`, data);
+    }
+    if (notRefused.length) {
+      return ok(
+        `The host does not refuse ${notRefused.join(", ")}, but this transport cannot drive it: chainHead_v1_call needs a followSubscription and delivers its result as a notification, not as a reply. That is a client-shape problem, not a permission one — PAPI implements the lifecycle, and pine-rpc drives contract reads through exactly this method. The legacy surface (state_call, archive_v1_call, system_*, author_*) is blocked outright, so this is the only door.`,
         data,
       );
     }
-    return ok(
-      `Runtime calls are reachable via ${runtimeCall.join(", ")}. A host-routed contract read is possible — it needs SCALE-encoded ReviveApi_call, which is what pine-rpc already implements.`,
+    return bad(
+      "No runtime-call method is reachable and none was left unrefused. A pallet-revive contract cannot be read through this host at all — reads must go to an external endpoint, and the host's censorship story is not available to Broadside.",
+      "method-not-found",
       data,
     );
   },
@@ -600,16 +616,26 @@ const contractRead: Check = {
     if (ctx.shared.hostSpeaksEth) {
       const rpc = ctx.shared.hostRpc as HostRpc;
       const r = await rpc.call("eth_call", [{ to: CONTRACT_ADDRESS, data: calldata }, "latest"]);
-      attempts.host = r.ok ? decodeResult("chainId", String(r.result)) : { ok: false, error: r.error?.message };
+      attempts.host = r.ok ? { ...decodeResult("chainId", String(r.result)), ms: r.ms } : { ok: false, error: r.error?.message, ms: r.ms };
     }
     if (ETH_RPC_URL) {
-      const r = await ethCall(ETH_RPC_URL, CONTRACT_ADDRESS, calldata);
-      attempts.control = r.ok ? decodeResult("chainId", String(r.result)) : { ok: false, error: r.error?.message };
+      // 8 s, well inside this check's 25 s budget, so a slow endpoint produces
+      // a timed attempt with evidence rather than a check that burns its whole
+      // budget and reports only that it ran out.
+      const r = await ethCall(ETH_RPC_URL, CONTRACT_ADDRESS, calldata, 8_000);
+      attempts.control = r.ok
+        ? { ...decodeResult("chainId", String(r.result)), ms: r.ms }
+        : { ok: false, error: r.error?.message, ms: r.ms };
     }
 
     const winner = pickWorking(attempts);
     const data = { address: CONTRACT_ADDRESS, expectedChainId: CONTRACT_CHAIN_ID, target: CONTRACT_TARGET, attempts, via: winner };
-    if (!winner) return bad("No transport could read the contract.", "host-call-failed", data);
+    if (!winner) {
+      const why = Object.entries(attempts)
+        .map(([k, v]) => `${k}: ${(v as { error?: string }).error ?? "no result"}`)
+        .join("; ");
+      return bad(`No transport could read the contract — ${why}.`, "host-call-failed", data);
+    }
 
     ctx.shared.readVia = winner;
     const reported = Number((attempts[winner] as { value: unknown }).value);
