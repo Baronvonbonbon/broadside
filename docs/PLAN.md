@@ -57,7 +57,7 @@ they are the second and third surfaces, not the first.
 | Old repos | `datum`, `datum-labs`, `datum-venture` stay live and untouched. No history import. |
 | Continuity | Clean break. New contracts, new token, new EIP-712 domain. No state migration. |
 | First surface | Polkadot App Product (`.dot`-published bundle) |
-| Chain | ⚠️ **Under review.** Chosen as Paseo Asset Hub; the device run found the host carries only **Devnet Asset Hub**, so a host-routed read needs contracts there instead. Pending the 1.2.0 allowlist probe. |
+| Chain | **Paseo Asset Hub**, parachain 1000 — EVM chain id 420420417, genesis `0xd6eec261…`. This is the chain the host carries; the descriptor calling it `devnet-asset-hub` is a naming trap, not a different chain. |
 | Token plane | Ships in alpha, in full |
 | Personhood | Optional viewer tier — priced, not mandated |
 | Repo | `Baronvonbonbon/broadside`, public, GPL-3.0-or-later |
@@ -127,7 +127,7 @@ designed in:
 | Constraint | What it means for Broadside |
 |---|---|
 | A substrate origin gets a **different H160**, derived from the AccountId32 rather than recovered from a signature | Only matters where `msg.sender` is the identity. Settlement does not care who submits. `publishers`/`advertiserStake` and the rest of the registry family do — so the cutover is per role, and belongs to Phase 5, not the viewer path. |
-| **There is no anonymous read.** An unmapped account cannot perform even a view call — `revive.AccountUnmapped` — and `revive.mapAccount` takes a deposit | Would be severe for a normal dApp. It is not for us: **the viewer is never an origin.** They sign an EIP-712 claim and never author a transaction. One well-known mapped read account serves every view call (a dry-run's origin is not published), and the relay is the only writer. |
+| ~~**There is no anonymous read.**~~ FARE measured `revive.AccountUnmapped` from an AccountId32 origin | **Does not apply to us — measured.** An *Ethereum-derived* origin (20 H160 bytes + twelve `0xEE`) reads without any mapping; `native-read.mjs` calls `chainId()` from the zero address successfully. Broadside's viewer identity is an H160 burner, so there is no deposit, no onboarding step, and no well-known read account. The viewer is never a transaction author either way. |
 | **EIP-712 keys do not move.** An sr25519 account cannot produce an `ecrecover`-able signature | This is the architecture already. The migration is *transport and payer identity only*; the viewer's derived secp256k1 burner is untouched. |
 
 **The device run settled it: the host-routed path exists.** `chainHead_v1_call` is allowed — the host
@@ -534,9 +534,9 @@ this inherits).
 | ~~Is `getAnonymousAlias()` stable per product?~~ | — | **Answered: it returns null.** The fallback is now the design — the per-product derived burner *is* the pseudonym. Same unlinkability, but Broadside's convention rather than a platform guarantee. |
 | ~~Does `getUserId()` exist and return something stable?~~ | — | **Answered: yes, and it is a global username.** Not a capability to build on — a hazard to quarantine. It is also the only thing a global rate limit could key on, which is the anonymous/verified tier boundary. |
 | ~~Can the host provider reach pallet-revive?~~ | — | **Answered: not for `paseo-asset-hub` on this build.** An external `eth-rpc` endpoint *is* reachable from inside the WebView. `pine-rpc` remains the option that keeps verification without the host. |
-| ~~Which chains does this host build carry?~~ | — | **Answered: `devnet-asset-hub`, and nothing else.** One of eight. So `BroadsideSeam` on Paseo Asset Hub is unreachable through the host by construction. |
+| ~~Which chains does this host build carry?~~ | — | **Answered: `devnet-asset-hub`, and nothing else** — but that descriptor *is* Paseo Asset Hub, so the host carries exactly the chain our contracts are on. The first reading of this, that the contracts were stranded, was wrong; see the correction in the report. |
 | ~~Is a runtime-call method on the host's RPC allowlist?~~ | — | **Answered: `chainHead_v1_call` is the one door, and it is open.** The host allows the new JSON-RPC spec (`chainSpec_v1_*`, `chainHead_v1_*`, `transaction_v1_broadcast`) and blocks the legacy surface (`state_*`, `system_*`, `author_*`, `archive_v1_call`) outright. So a host-routed read is possible — but only from a client that drives the chainHead subscription lifecycle, which means **PAPI, not raw JSON-RPC**. |
-| **Does Devnet Asset Hub have an eth-rpc endpoint, or does deployment go native?** | Phase 2 | Contracts must move there for a host-routed path. `deploy.mjs` speaks eth-rpc; if devnet has no such endpoint, deployment needs a PAPI `revive.instantiateWithCode` script. Contract sources are unaffected either way. |
+| ~~Does Devnet Asset Hub have an eth-rpc endpoint?~~ | — | **Answered: it is the same chain, and yes** — `https://eth-rpc-testnet.polkadot.io/` fronts it. No migration and no native deploy script are needed. `contracts/scripts/native-read.mjs` proves the eth-rpc-free *read* path regardless, since that is the one the host forces. |
 | Does `cdm` accept EVM bytecode, or is PolkaVM mandatory? | Phase 2 | Either way Broadside targets PolkaVM, so this only affects whether an EVM escape hatch exists. |
 | Bulletin retention is ~2 weeks | Phase 4 onward | The `.dot` bundle needs a renewal keeper. FARE reached the same conclusion (`POLKADOT-PLATFORM-PLAN.md` §4.6). |
 | Kusama Shield pool availability and its 5 known bugs | Phase 6 | Phase 6 is already last, and the interim posture is a plain UI warning. |

@@ -102,12 +102,41 @@ Suite 1.1.0 swept all eight descriptors with `isChainSupported`:
 `chainSpec_v1_genesisHash` returning `0xd6eec261…` — exactly the descriptor's value, so the chain is
 genuinely there and correctly identified.
 
-Two things follow, and both are decisions rather than observations:
+> ### ⚠️ Correction — the first reading of this was wrong
+>
+> This report originally concluded *"`BroadsideSeam` is on the wrong chain; the fix is deploying to
+> Devnet Asset Hub."* **That is false, and the error was reading the descriptor names at face value.**
+>
+> `devnet-asset-hub` **is** Paseo Asset Hub, parachain 1000. Verified three ways:
+> `wss://asset-hub-paseo-rpc.n.dwellir.com` returns `0xd6eec261…` for block 0; that endpoint and
+> `https://eth-rpc-testnet.polkadot.io/` report the **identical block height**; and `pad`'s own
+> environment config describes its `devnet` as *"PCF devnet — public Paseo AH1000/Bulletin1010"*.
+>
+> The descriptor named `paseo-asset-hub` (`0xbf0488db…`) is a *different*, newer chain — "Paseo Next
+> v2 Hub" — which this host build does not carry. `@parity/truapi` names only that newer one, which
+> is why run 1 asked for it and got a refusal.
+>
+> **So the host carries exactly the chain our contracts are already on.** There is no migration, and
+> no native deploy script is needed. What follows below about eth-rpc being unavailable *through the
+> host* still stands — that part was measured, not inferred.
 
-**`BroadsideSeam` is on the wrong chain for a host-routed path.** It is deployed to Paseo Asset Hub
-(420420417). The host does not carry Paseo Asset Hub. A Product on this build cannot reach that
-contract through the host at any price — the fix is deploying to Devnet Asset Hub, not tuning
-anything.
+Verified with `node contracts/scripts/native-read.mjs`, which drives the same runtime API the host
+forces, over a plain Substrate RPC and no eth-rpc at all:
+
+| | Check | Evidence |
+|---|---|---|
+| ✓ | Chain is the one the host carries | genesis `0xd6eec261…` |
+| ✓ | `ReviveApi_code` returns a blob | 15,932 bytes |
+| ✓ | The blob is **native PolkaVM** | magic `0x50564d00` = `PVM\0` |
+| ✓ | It matches the local artifact exactly | byte for byte |
+| ✓ | `ReviveApi_call` executes a view function | `chainId()` = 420420417 |
+| ✓ | **An unmapped zero origin can read** | no mapped account needed for view calls |
+
+That last row refines FARE's finding 2 rather than contradicting it. FARE measured
+`revive.AccountUnmapped` from an **AccountId32** origin. An **Ethereum-derived** origin — the 20 H160
+bytes followed by twelve `0xEE` — is accepted without mapping. Since Broadside's viewer identity is an
+H160 burner, the anonymous-read constraint does not bite: no deposit, no onboarding step, no
+well-known read account required.
 
 **The host transport does not speak Ethereum RPC.**
 

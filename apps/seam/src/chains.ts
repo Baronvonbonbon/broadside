@@ -18,6 +18,11 @@
  * independent sources — polkadot-asset-hub matches the hash sonde's chain probe
  * used, paseo-asset-hub and paseo-individuality match truapi's two well-known
  * entries — which is what makes the other five credible.
+ *
+ * **Read the note on `devnet-asset-hub` before drawing any conclusion from a
+ * chain being "unsupported".** The descriptor names do not mean what they look
+ * like they mean, and reading them at face value produced a confident, wrong
+ * claim that Broadside's contracts were on an unreachable chain.
  */
 
 export interface KnownChain {
@@ -28,15 +33,35 @@ export interface KnownChain {
   /** Asset Hubs are the only ones that can hold a pallet-revive contract. */
   kind: "asset-hub" | "bulletin" | "individuality";
   env: "devnet" | "paseo" | "kusama" | "polkadot";
+  /** EVM chain id, where one is known — this is what an EIP-712 domain binds to. */
+  evmChainId?: number;
+  /** A public Substrate endpoint, for tooling that runs outside the host. */
+  ws?: string;
 }
 
 export const KNOWN_CHAINS: readonly KnownChain[] = [
   {
+    // ⚠️ The naming is a trap, and it cost a wrong conclusion once already.
+    //
+    // `devnet-asset-hub` IS **Paseo Asset Hub, parachain 1000** — the chain that
+    // `https://eth-rpc-testnet.polkadot.io/` fronts as EVM chain id 420420417,
+    // and the one `pad --env devnet` publishes against ("PCF devnet — public
+    // Paseo AH1000/Bulletin1010", in pad's own words). Verified: the genesis
+    // below is what `wss://asset-hub-paseo-rpc.n.dwellir.com` returns for block
+    // 0, and both endpoints report the identical block height.
+    //
+    // The descriptor named `paseo-asset-hub` is a *different*, newer chain —
+    // "Paseo Next v2 Hub" — which the current host build does not carry.
+    //
+    // So "the host carries only devnet-asset-hub" does NOT mean it cannot see
+    // our contracts. It means the opposite.
     descriptor: "devnet-asset-hub",
-    name: "Devnet Asset Hub",
+    name: "Paseo Asset Hub (descriptor: devnet-asset-hub)",
     genesis: "0xd6eec26135305a8ad257a20d003357284c8aa03d0bdb2b357ab0a22371e11ef2",
     kind: "asset-hub",
     env: "devnet",
+    evmChainId: 420420417,
+    ws: "wss://asset-hub-paseo-rpc.n.dwellir.com",
   },
   {
     descriptor: "devnet-bulletin",
