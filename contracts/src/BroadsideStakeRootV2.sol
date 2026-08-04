@@ -1,0 +1,866 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+pragma solidity ^0.8.24;
+
+import "./BroadsideUpgradable.sol";
+import "./PaseoSafeSender.sol";
+import "./interfaces/IBroadsideStakeRoot.sol";
+import "./interfaces/IBroadsideIdentityVerifier.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+/// @title BroadsideStakeRootV2
+/// @notice Permissionless bonded-reporter Merkle root oracle for ZK Path A.
+///         Replaces the owner-managed N-of-M reporter set in V1 with a
+///         stake-bonded permissionless mechanism: anyone with ≥
+///         reporterMinStake DOT can propose roots; threshold-of-bonded-stake
+///         approvers finalize; phantom-leaf fraud is caught by anyone via
+///         the commitment registry (registerCommitment).
+///
+///         Design rationale: see narrative-analysis/proposal-stakeroot-optimistic.md
+///         and narrative-analysis/task-stakeroot-v2-implementation.md.
+///
+///         Three fraud-proof modes (only phantom-leaf is permissionless;
+///         balance/exclusion require ZK identity proof — deferred to a
+///         follow-up that adds the identity verifier):
+///           1. Balance fraud  — leaf claims wrong balance for a real user.
+///                               DEFERRED. Needs ZK identity verifier so
+///                               challenger proves ownership of commitment.
+///           2. Phantom leaf   — tree contains a commitment not in the
+///                               registered set. SHIPPED via
+///                               challengePhantomLeaf.
+///           3. Exclusion      — user's registered commitment is missing.
+///                               DEFERRED (same reason as #1).
+///
+///         The phantom-leaf path alone is meaningful: an attacker can no
+///         longer mint Sybil leaves from thin air; every leaf must
+///         correspond to a registered commitment, and each commitment
+///         registration costs commitmentBond.
+contract BroadsideStakeRootV2 is IBroadsideStakeRoot, PaseoSafeSender, BroadsideUpgradable {
+
+    /// @notice Upgrade ladder version.
+    function version() public pure virtual override returns (uint256) { return 1; }
+
+    // ── Constants (sanity ceilings — params governable up to these) ───────────
+    uint256 public constant MAX_APPROVAL_THRESHOLD_BPS = 9900;
+    uint64  public constant MAX_CHALLENGE_WINDOW = 1_209_600;  // ~84d @ 6s/block
+    uint64  public constant MAX_REPORTER_EXIT_DELAY = 1_209_600;
+    uint16  public constant MAX_SLASHED_TO_CHALLENGER_BPS = 10000;
+    uint16  public constant MAX_SLASH_APPROVER_BPS = 5000;     // 50% cap
+    uint256 public constant LOOKBACK_EPOCHS = 8;
+
+    /// @notice Snapshot-block recency constraints (Resolution 3a in
+    ///         task-zk-identity-verifier.md). proposeRoot requires the
+    ///         snapshot block to fall in
+    ///         [block.number - SNAPSHOT_MAX_AGE, block.number - SNAPSHOT_MIN_AGE].
+    ///         Rationale: balance-fraud challenger compares the leaf's claimed
+    ///         balance to their CURRENT DATUM balance. The recency window
+    ///         narrows the drift between snapshot and challenge time so the
+    ///         comparison is meaningful without on-chain historical state.
+    uint64 public constant SNAPSHOT_MIN_AGE = 10;
+    uint64 public constant SNAPSHOT_MAX_AGE = 100;
+
+    // ── Reporter set (stake-bonded, permissionless) ───────────────────────────
+    struct ReporterStake {
+        uint256 amount;
+        uint64  joinedAtBlock;
+        uint64  exitProposedBlock;   // 0 = active
+    }
+    mapping(address => ReporterStake) public reporterStake;
+    address[] public reporterList;
+    mapping(address => uint256) private _reporterIndex;
+    uint256 public totalReporterStake;
+
+    // ── Governable parameters ─────────────────────────────────────────────────
+    uint256 public reporterMinStake;
+    uint64  public reporterExitDelay;
+    uint16  public approvalThresholdBps;
+    uint64  public challengeWindow;
+    uint256 public proposerBond;
+    uint256 public challengerBond;
+    uint16  public slashedToChallengerBps;
+    uint16  public slashApproverBps;
+    uint256 public commitmentBond;
+
+    address public treasury;
+
+    /// @notice ZK identity verifier (BroadsideIdentityVerifier). Enables
+    ///         balance-fraud challenges. Address(0) leaves balance-fraud
+    ///         challenge disabled; phantom-leaf challenge remains available.
+    ///         Plumbing-gated (not per-call lock-once) so a circuit-bug
+    ///         verifier can be swapped before plumbingLocked is set.
+    IBroadsideIdentityVerifier public identityVerifier;
+    bool public plumbingLocked;
+
+    /// @notice DATUM token used for the balance comparison in
+    ///         challengeRootBalance. Set in constructor (0 = not gated yet).
+    IERC20 public immutable datumToken;
+
+    // ── Per-pending-root state ────────────────────────────────────────────────
+    struct PendingRoot {
+        bytes32 root;
+        uint64  proposedAtBlock;
+        uint64  snapshotBlock;
+        address proposer;
+        uint128 proposerBond;
+        uint256 approvedStake;       // cumulative bonded stake of approvers
+        bool    slashed;
+        // F-029 fix (2026-05-20): snapshot of totalReporterStake at the
+        // moment the root was proposed. finalizeRoot uses this as the
+        // threshold denominator so honest reporter exits during the
+        // challenge window cannot lower the bar a hostile root must clear.
+        uint256 totalStakeAtPropose;
+    }
+    mapping(uint256 => PendingRoot) private _pending;
+    mapping(uint256 => mapping(address => bool)) private _approvedBy;
+    // F-030 fix (2026-05-20): per-epoch list of approvers (proposer + each
+    // approveRoot caller). Used by _slashProposer so the slash loop
+    // iterates only actual approvers instead of the full reporterList,
+    // bounding worst-case gas to "approvers, not all reporters".
+    mapping(uint256 => address[]) private _approversByEpoch;
+
+    // ── Finalized roots (mirrors V1's storage shape) ──────────────────────────
+    mapping(uint256 => bytes32) public override rootAt;
+    uint256 public override latestEpoch;
+
+    // ── Commitment registry (R1: closes phantom-leaf fraud) ───────────────────
+    mapping(bytes32 => bool) public registeredCommitments;
+    bytes32[] public commitmentList;
+
+    // ── Pull-pattern payouts ──────────────────────────────────────────────────
+    mapping(address => uint256) private _pendingPayout;
+
+    // ── Enumeration for upgrade migration (holds reporter stakes + payouts) ──
+    // reporterList + commitmentList already enumerate; add committed epochs
+    // (sparse rootAt keys) + payout holders (reporters/proposers/challengers/
+    // treasury). All _pendingPayout credits route through _queuePayout.
+    uint256[] private _committedEpochs;
+    address[] private _payoutHolders;
+    mapping(address => bool) private _payoutTracked;
+    bool public fundsMigratedOut;
+    event FundsMigratedOut(address indexed successor, uint256 amount);
+
+    function _queuePayout(address a, uint256 amt) internal {
+        _pendingPayout[a] += amt;
+        if (a != address(0) && !_payoutTracked[a]) { _payoutTracked[a] = true; _payoutHolders.push(a); }
+    }
+
+    // ── G-4 first close (2026-05-20): permissionless inactivity eviction ──
+    /// @notice Last block at which a reporter proposed or approved a root
+    ///         (or joined, treated as initial activity so a fresh joiner is
+    ///         not immediately marked inactive). Drives `markInactive`.
+    mapping(address => uint64) public lastActiveBlock;
+    /// @notice Blocks of silence after which any caller can `markInactive` a
+    ///         reporter. Closes G-4 (reporter cabal stonewall): a malicious
+    ///         set that refuses to propose/approve can be evicted without
+    ///         waiting for governance. Bounded by MAX_INACTIVITY_THRESHOLD.
+    uint64 public inactivityThresholdBlocks;
+    /// @notice Ceiling on `inactivityThresholdBlocks`. ~30 days. A threshold
+    ///         longer than this defeats the close (stonewall window is too
+    ///         long); a threshold shorter risks false-positives on honest
+    ///         reporters during off-peak periods.
+    uint64 public constant MAX_INACTIVITY_THRESHOLD = 432_000; // ~30d @ 6s
+    /// @notice Minimum threshold. Below this and honest reporters get
+    ///         false-positive-marked during legitimate quiet periods.
+    uint64 public constant MIN_INACTIVITY_THRESHOLD = 14_400;  // ~24h @ 6s
+
+    event ReporterMarkedInactive(address indexed reporter, uint64 lastActiveBlock, uint64 markedAtBlock);
+    event InactivityThresholdSet(uint64 value);
+
+    // ── Events ────────────────────────────────────────────────────────────────
+    event ReporterJoined(address indexed reporter, uint256 stake);
+    event ReporterExitProposed(address indexed reporter, uint64 unlockAtBlock);
+    event ReporterExited(address indexed reporter, uint256 amount);
+    event ReporterMinStakeSet(uint256 value);
+    event ReporterExitDelaySet(uint64 value);
+    event ApprovalThresholdBpsSet(uint16 value);
+    event ChallengeWindowSet(uint64 value);
+    event ProposerBondSet(uint256 value);
+    event ChallengerBondSet(uint256 value);
+    event SlashedToChallengerBpsSet(uint16 value);
+    event SlashApproverBpsSet(uint16 value);
+    event CommitmentBondSet(uint256 value);
+    event TreasurySet(address treasury);
+
+    event RootProposed(uint256 indexed epoch, bytes32 indexed root, address indexed proposer, uint64 snapshotBlock);
+    event RootApproved(uint256 indexed epoch, address indexed approver, uint256 approverStake);
+    event RootFinalized(uint256 indexed epoch, bytes32 indexed root);
+    event RootSlashed(uint256 indexed epoch, address indexed challenger, uint256 totalSlash);
+    event ApproverSlashed(uint256 indexed epoch, address indexed approver, uint256 amount);
+    event CommitmentRegistered(bytes32 indexed commitment, address indexed registrant);
+
+    event PayoutClaimed(address indexed recipient, uint256 amount);
+
+    // ── Constructor ───────────────────────────────────────────────────────────
+    /// @param _treasury           recipient for the treasury fraction of slashed bonds
+    /// @param _reporterMinStake   floor on per-reporter bond (default suggestion: 1 DOT)
+    /// @param _reporterExitDelay  blocks between proposeReporterExit and finalizeReporterExit
+    /// @param _approvalThresholdBps   fraction of totalReporterStake that must approve (5100 = 51%)
+    /// @param _challengeWindow    blocks during which a proposed root can be challenged
+    /// @param _proposerBond       bond posted when proposing a root
+    /// @param _challengerBond     bond posted to challenge a root
+    /// @param _slashedToChallengerBps fraction of slashed total paid to successful challenger
+    /// @param _slashApproverBps   fraction of each approver's stake slashed alongside proposer bond
+    /// @param _commitmentBond     cost to register a commitment in the on-chain set
+    constructor(
+        address  _treasury,
+        uint256  _reporterMinStake,
+        uint64   _reporterExitDelay,
+        uint16   _approvalThresholdBps,
+        uint64   _challengeWindow,
+        uint256  _proposerBond,
+        uint256  _challengerBond,
+        uint16   _slashedToChallengerBps,
+        uint16   _slashApproverBps,
+        uint256  _commitmentBond,
+        address  _datumToken
+    ) BroadsideOwnable() {
+        require(_treasury != address(0), "E00");
+        require(_reporterMinStake > 0, "E11");
+        require(_reporterExitDelay > 0 && _reporterExitDelay <= MAX_REPORTER_EXIT_DELAY, "E11");
+        require(_approvalThresholdBps > 0 && _approvalThresholdBps <= MAX_APPROVAL_THRESHOLD_BPS, "E11");
+        require(_challengeWindow > 0 && _challengeWindow <= MAX_CHALLENGE_WINDOW, "E11");
+        require(_slashedToChallengerBps <= MAX_SLASHED_TO_CHALLENGER_BPS, "E11");
+        require(_slashApproverBps <= MAX_SLASH_APPROVER_BPS, "E11");
+        // _datumToken == address(0) is permitted — challengeRootBalance will
+        // revert until the token is later wired (or fork-deployed). Phantom-
+        // leaf challenge works without it.
+
+        treasury = _treasury;
+        reporterMinStake = _reporterMinStake;
+        reporterExitDelay = _reporterExitDelay;
+        approvalThresholdBps = _approvalThresholdBps;
+        challengeWindow = _challengeWindow;
+        proposerBond = _proposerBond;
+        challengerBond = _challengerBond;
+        slashedToChallengerBps = _slashedToChallengerBps;
+        slashApproverBps = _slashApproverBps;
+        commitmentBond = _commitmentBond;
+        datumToken = IERC20(_datumToken);
+        // G-4 default: ~7d (100800 blocks @ 6s). Within [MIN, MAX] bounds.
+        inactivityThresholdBlocks = 100_800;
+    }
+
+    /// @dev Accept contract-originated transfers (slash residuals).
+    receive() external payable {}
+
+    // ── Admin (owner-only) ────────────────────────────────────────────────────
+    function setTreasury(address addr) external onlyOwner {
+        require(addr != address(0), "E00");
+        treasury = addr;
+        emit TreasurySet(addr);
+    }
+    function setReporterMinStake(uint256 v) external onlyOwner {
+        require(v > 0, "E11");
+        reporterMinStake = v;
+        emit ReporterMinStakeSet(v);
+    }
+    function setReporterExitDelay(uint64 v) external onlyOwner {
+        require(v > 0 && v <= MAX_REPORTER_EXIT_DELAY, "E11");
+        reporterExitDelay = v;
+        emit ReporterExitDelaySet(v);
+    }
+    function setApprovalThresholdBps(uint16 v) external onlyOwner {
+        require(v > 0 && v <= MAX_APPROVAL_THRESHOLD_BPS, "E11");
+        approvalThresholdBps = v;
+        emit ApprovalThresholdBpsSet(v);
+    }
+    function setChallengeWindow(uint64 v) external onlyOwner {
+        require(v > 0 && v <= MAX_CHALLENGE_WINDOW, "E11");
+        challengeWindow = v;
+        emit ChallengeWindowSet(v);
+    }
+    function setProposerBond(uint256 v) external onlyOwner {
+        proposerBond = v;
+        emit ProposerBondSet(v);
+    }
+    function setChallengerBond(uint256 v) external onlyOwner {
+        challengerBond = v;
+        emit ChallengerBondSet(v);
+    }
+    function setSlashedToChallengerBps(uint16 v) external onlyOwner {
+        require(v <= MAX_SLASHED_TO_CHALLENGER_BPS, "E11");
+        slashedToChallengerBps = v;
+        emit SlashedToChallengerBpsSet(v);
+    }
+    function setSlashApproverBps(uint16 v) external onlyOwner {
+        require(v <= MAX_SLASH_APPROVER_BPS, "E11");
+        slashApproverBps = v;
+        emit SlashApproverBpsSet(v);
+    }
+    function setCommitmentBond(uint256 v) external onlyOwner {
+        commitmentBond = v;
+        emit CommitmentBondSet(v);
+    }
+
+    // ── Divergence circuit breaker ───────────────────────────────────────────
+    // The merkle root is opaque on-chain (proposeRoot carries no comparable
+    // user-stake aggregate), so divergence is DETECTED off-chain by
+    // scripts/watch-stakeRoot-divergence.ts and ENFORCED here: when tripped,
+    // isRecent() returns false for every root, so ClaimValidator rejects all
+    // stake-proof-backed claims (stake-gated settlement freezes) until a
+    // deliberate reset. Guards against a captured/buggy reporter set
+    // systematically mispricing stakes. Plain (non-stake-proof) settlement is
+    // unaffected — the blast radius is exactly the oracle-gated surface.
+    bool public divergenceBreakerTripped;
+    /// @notice Fast trip/reset authority (the off-chain watcher's hot key /
+    ///         a guardian). Owner (Timelock) can always act too.
+    address public breakerOperator;
+    event DivergenceBreakerTripped(address indexed by);
+    event DivergenceBreakerReset(address indexed by);
+    event BreakerOperatorSet(address indexed operator);
+
+    function setBreakerOperator(address op) external onlyOwner {
+        breakerOperator = op;
+        emit BreakerOperatorSet(op);
+    }
+    function tripDivergenceBreaker() external {
+        require(msg.sender == owner() || msg.sender == breakerOperator, "E19");
+        divergenceBreakerTripped = true;
+        emit DivergenceBreakerTripped(msg.sender);
+    }
+    function resetDivergenceBreaker() external {
+        require(msg.sender == owner() || msg.sender == breakerOperator, "E19");
+        divergenceBreakerTripped = false;
+        emit DivergenceBreakerReset(msg.sender);
+    }
+
+    /// @notice Wire the ZK identity verifier used by challengeRootBalance.
+    ///         Plumbing-gated (not per-call lock-once) so a buggy verifier
+    ///         can be swapped before lockPlumbing fires. address(0) re-
+    ///         disables the balance-fraud path.
+    event IdentityVerifierSet(address indexed addr);
+    function setIdentityVerifier(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        identityVerifier = IBroadsideIdentityVerifier(addr);
+        emit IdentityVerifierSet(addr);
+    }
+
+    /// @notice Lock identity-verifier swappability forever. After this,
+    ///         setIdentityVerifier reverts; a buggy verifier requires a
+    ///         full v2 redeploy. Called when the protocol is confident
+    ///         in the verifier's correctness.
+    event PlumbingLocked();
+    function lockPlumbing() external onlyOwner whenOpenGovPhase {
+        require(!plumbingLocked, "already locked");
+        plumbingLocked = true;
+        emit PlumbingLocked();
+    }
+
+    // ── Reporter lifecycle (permissionless) ───────────────────────────────────
+
+    /// @notice Stake-bond to join the permissionless reporter set.
+    function joinReporters() external payable nonReentrant whenNotFrozen {
+        require(msg.value >= reporterMinStake, "E11");
+        ReporterStake storage s = reporterStake[msg.sender];
+        require(s.amount == 0, "E22"); // already a reporter
+
+        s.amount = msg.value;
+        s.joinedAtBlock = uint64(block.number);
+        _reporterIndex[msg.sender] = reporterList.length;
+        reporterList.push(msg.sender);
+        totalReporterStake += msg.value;
+        // G-4: treat join as activity so a fresh reporter isn't immediately
+        // markInactive-able. They have a full inactivityThresholdBlocks to
+        // produce their first propose/approve.
+        lastActiveBlock[msg.sender] = uint64(block.number);
+        emit ReporterJoined(msg.sender, msg.value);
+    }
+
+    /// @notice Begin unbonding. Cannot be called twice; cannot propose/approve
+    ///         while exit is pending (proposeRoot / approveRoot check
+    ///         exitProposedBlock == 0). Removes voting weight immediately so a
+    ///         reporter on the way out can't sandwich votes.
+    function proposeReporterExit() external whenNotFrozen {
+        ReporterStake storage s = reporterStake[msg.sender];
+        require(s.amount > 0, "E01");
+        require(s.exitProposedBlock == 0, "E22");
+        s.exitProposedBlock = uint64(block.number);
+        // Remove voting weight at exit proposal time so we cannot approve
+        // future roots from a flagging-down position.
+        totalReporterStake -= s.amount;
+        emit ReporterExitProposed(msg.sender, s.exitProposedBlock + reporterExitDelay);
+    }
+
+    /// @notice Reclaim stake after reporterExitDelay blocks have elapsed.
+    function finalizeReporterExit() external nonReentrant whenNotFrozen {
+        ReporterStake storage s = reporterStake[msg.sender];
+        require(s.exitProposedBlock != 0, "E01");
+        require(block.number >= uint256(s.exitProposedBlock) + uint256(reporterExitDelay), "E96");
+
+        uint256 amount = s.amount;
+        // Remove from reporterList via swap-and-pop
+        uint256 idx = _reporterIndex[msg.sender];
+        uint256 lastIdx = reporterList.length - 1;
+        if (idx != lastIdx) {
+            address last = reporterList[lastIdx];
+            reporterList[idx] = last;
+            _reporterIndex[last] = idx;
+        }
+        reporterList.pop();
+        delete _reporterIndex[msg.sender];
+        delete reporterStake[msg.sender];
+
+        _queuePayout(msg.sender, amount);
+        emit ReporterExited(msg.sender, amount);
+    }
+
+    function _isActiveReporter(address who) internal view returns (bool) {
+        ReporterStake storage s = reporterStake[who];
+        return s.amount > 0 && s.exitProposedBlock == 0;
+    }
+
+    // ── G-4 first close (2026-05-20): permissionless inactivity eviction ──
+
+    /// @notice Force a reporter into exit-pending state if they've been
+    ///         inactive (no propose/approve) for `inactivityThresholdBlocks`.
+    ///         Permissionless: any caller. Closes G-4 (reporter cabal
+    ///         stonewall) — a malicious set that refuses to do their job can
+    ///         be evicted without governance vote.
+    ///
+    /// @dev    Semantically equivalent to the reporter calling
+    ///         `proposeReporterExit` themselves. Voting weight drops
+    ///         immediately (totalReporterStake -= amount); stake stays
+    ///         locked for `reporterExitDelay` so the reporter remains
+    ///         slashable for any previously-approved fraudulent root.
+    function markInactive(address reporter) external nonReentrant whenNotFrozen {
+        ReporterStake storage s = reporterStake[reporter];
+        require(s.amount > 0, "E01");           // not a reporter
+        require(s.exitProposedBlock == 0, "E22"); // already exit-pending
+        uint64 lab = lastActiveBlock[reporter];
+        // Defensive: lab == 0 should never happen (set on joinReporters)
+        // but if it did, fall through to "never active" semantics.
+        require(uint256(lab) + uint256(inactivityThresholdBlocks) < block.number, "E96");
+
+        s.exitProposedBlock = uint64(block.number);
+        totalReporterStake -= s.amount;
+        emit ReporterMarkedInactive(reporter, lab, uint64(block.number));
+        emit ReporterExitProposed(reporter, s.exitProposedBlock + reporterExitDelay);
+    }
+
+    /// @notice Tune the inactivity-threshold window. Bounded to
+    ///         [MIN_INACTIVITY_THRESHOLD, MAX_INACTIVITY_THRESHOLD].
+    function setInactivityThresholdBlocks(uint64 v) external onlyOwner {
+        require(v >= MIN_INACTIVITY_THRESHOLD && v <= MAX_INACTIVITY_THRESHOLD, "E11");
+        inactivityThresholdBlocks = v;
+        emit InactivityThresholdSet(v);
+    }
+
+    function reporterCount() external view returns (uint256) { return reporterList.length; }
+    function isActiveReporter(address who) external view returns (bool) { return _isActiveReporter(who); }
+
+    // ── Commitment registry (R1) ─────────────────────────────────────────────
+
+    /// @notice Register a Poseidon-commitment in the on-chain set. Required
+    ///         before any leaf with this commitment can be included in a
+    ///         finalized root (enforced via challengePhantomLeaf). Bond is
+    ///         non-refundable — pricing the per-commitment Sybil cost.
+    function registerCommitment(bytes32 commitment) external payable nonReentrant whenNotFrozen {
+        require(msg.value >= commitmentBond, "E11");
+        require(commitment != bytes32(0), "E00");
+        require(!registeredCommitments[commitment], "E22");
+
+        registeredCommitments[commitment] = true;
+        commitmentList.push(commitment);
+        // Bond is routed to treasury (Sybil-pricing, not refundable).
+        if (msg.value > 0) _queuePayout(treasury, msg.value);
+
+        emit CommitmentRegistered(commitment, msg.sender);
+    }
+
+    function commitmentCount() external view returns (uint256) { return commitmentList.length; }
+
+    // ── Root proposal / approval / finalization ──────────────────────────────
+
+    /// @notice Propose a new stake root. Caller must be an active reporter
+    ///         (stake ≥ min, not in exit) and post proposerBond.
+    /// @param epoch         must be strictly greater than latestEpoch
+    /// @param snapshotBlock block at which the off-chain tree was computed.
+    ///                      Future fraud-proof modes will read DATUM token state
+    ///                      against this block. Must not be a future block.
+    /// @param root          Merkle root of leaves (Poseidon(commitment, balance))
+    function proposeRoot(uint256 epoch, uint64 snapshotBlock, bytes32 root) external payable nonReentrant whenNotFrozen {
+        require(_isActiveReporter(msg.sender), "E01");
+        require(msg.value >= proposerBond, "E11");
+        require(epoch > latestEpoch, "E64");
+        require(root != bytes32(0), "E11");
+        // Snapshot-block recency window (Resolution 3a from
+        // task-zk-identity-verifier.md). snapshotBlock must be old enough
+        // that balances are stable (≥ SNAPSHOT_MIN_AGE behind) AND fresh
+        // enough that a challenger's CURRENT balance is a usable proxy for
+        // the snapshot balance (≤ SNAPSHOT_MAX_AGE old).
+        require(snapshotBlock + SNAPSHOT_MIN_AGE <= uint64(block.number), "E11");
+        require(uint64(block.number) <= snapshotBlock + SNAPSHOT_MAX_AGE, "E11");
+        require(_pending[epoch].proposer == address(0), "E22"); // first-finalised-wins
+        require(rootAt[epoch] == bytes32(0), "E22");
+
+        PendingRoot storage p = _pending[epoch];
+        p.root = root;
+        p.proposedAtBlock = uint64(block.number);
+        p.snapshotBlock = snapshotBlock;
+        p.proposer = msg.sender;
+        p.proposerBond = uint128(msg.value);
+        // F-029 fix: snapshot the global stake denominator at propose time.
+        p.totalStakeAtPropose = totalReporterStake;
+
+        // Proposer's own stake counts as the first approval.
+        _approvedBy[epoch][msg.sender] = true;
+        p.approvedStake = reporterStake[msg.sender].amount;
+        // F-030 fix: track approvers per-epoch for the bounded slash loop.
+        _approversByEpoch[epoch].push(msg.sender);
+        // G-4: refresh activity for this reporter on propose.
+        lastActiveBlock[msg.sender] = uint64(block.number);
+
+        emit RootProposed(epoch, root, msg.sender, snapshotBlock);
+        emit RootApproved(epoch, msg.sender, reporterStake[msg.sender].amount);
+    }
+
+    /// @notice Co-sign a pending root. Adds the caller's bonded stake to the
+    ///         approval tally. Cannot approve after the challenge window closes
+    ///         (no point — finalization is one-shot).
+    function approveRoot(uint256 epoch) external nonReentrant whenNotFrozen {
+        require(_isActiveReporter(msg.sender), "E01");
+        PendingRoot storage p = _pending[epoch];
+        require(p.proposer != address(0), "E01");
+        require(!p.slashed, "E22");
+        require(block.number <= uint256(p.proposedAtBlock) + uint256(challengeWindow), "E96");
+        require(!_approvedBy[epoch][msg.sender], "E22");
+
+        _approvedBy[epoch][msg.sender] = true;
+        p.approvedStake += reporterStake[msg.sender].amount;
+        // F-030 fix: record approver in the per-epoch list for the
+        // bounded slash loop.
+        _approversByEpoch[epoch].push(msg.sender);
+        // G-4: refresh activity for this reporter on approve.
+        lastActiveBlock[msg.sender] = uint64(block.number);
+        emit RootApproved(epoch, msg.sender, reporterStake[msg.sender].amount);
+    }
+
+    /// @notice Finalize a pending root after the challenge window closes.
+    ///         Requires approvedStake ≥ approvalThresholdBps × totalReporterStake.
+    function finalizeRoot(uint256 epoch) external nonReentrant whenNotFrozen {
+        PendingRoot storage p = _pending[epoch];
+        require(p.proposer != address(0), "E01");
+        require(!p.slashed, "E22");
+        require(block.number > uint256(p.proposedAtBlock) + uint256(challengeWindow), "E96");
+        // F-029 fix: use the proposal-time snapshot of totalReporterStake
+        // as the threshold denominator. The previous `totalReporterStake`
+        // read picked up honest reporter exits during the challenge
+        // window, lowering the bar an attacker's approvals had to clear.
+        // The snapshot pins the quorum to the population that existed
+        // when the root was proposed.
+        require(p.approvedStake * 10000 >= p.totalStakeAtPropose * uint256(approvalThresholdBps), "E46");
+
+        bytes32 root = p.root;
+        rootAt[epoch] = root;
+        _committedEpochs.push(epoch);
+        if (epoch > latestEpoch) latestEpoch = epoch;
+
+        // Refund proposer bond
+        _queuePayout(p.proposer, uint256(p.proposerBond));
+
+        // Clear pending state. We don't iterate _approvedBy[epoch][*] — that
+        // mapping persists, which is fine (it's never re-read after finalization
+        // and storage refunds aren't worth the complexity).
+        delete _pending[epoch];
+
+        emit RootFinalized(epoch, root);
+    }
+
+    // ── Fraud proofs ─────────────────────────────────────────────────────────
+
+    /// @notice Phantom-leaf challenge: anyone can prove a leaf is in the
+    ///         proposed root but its commitment is NOT in the on-chain
+    ///         registered set. Slashes the proposer (and approvers).
+    ///
+    /// @param epoch          target pending root
+    /// @param commitment     the commitment encoded in the bad leaf
+    /// @param claimedBalance the balance encoded in the bad leaf
+    /// @param leafIndex      index of the leaf in the Merkle tree
+    /// @param siblings       Merkle path siblings from leaf to root
+    /// @dev Leaf is computed as keccak256(commitment, claimedBalance). Real
+    ///      deployment will likely use Poseidon for circuit compatibility;
+    ///      keccak is used here for cheaper on-chain verification and is
+    ///      consistent with how the challenger constructs the leaf. The
+    ///      reporters' off-chain tree builder must match this.
+    function challengePhantomLeaf(
+        uint256 epoch,
+        bytes32 commitment,
+        uint256 claimedBalance,
+        uint256 leafIndex,
+        bytes32[] calldata siblings
+    ) external payable nonReentrant whenNotFrozen {
+        require(msg.value >= challengerBond, "E11");
+        PendingRoot storage p = _pending[epoch];
+        require(p.proposer != address(0), "E01");
+        require(!p.slashed, "E22");
+        require(block.number <= uint256(p.proposedAtBlock) + uint256(challengeWindow), "E96");
+
+        // 1. Verify the leaf is actually in the proposed root
+        bytes32 leaf = keccak256(abi.encodePacked(commitment, claimedBalance));
+        require(_verifyMerkle(p.root, leaf, leafIndex, siblings), "E53");
+
+        // 2. Verify the commitment is NOT registered (phantom)
+        require(!registeredCommitments[commitment], "E53");
+
+        // Refund challenger their bond before slashing accounting
+        _queuePayout(msg.sender, msg.value);
+
+        _slashProposer(epoch, msg.sender);
+    }
+
+    /// @notice Balance-fraud challenge: prove the leaf for a registered
+    ///         commitment encodes a balance that doesn't match the caller's
+    ///         actual DATUM balance. Caller proves ownership of the
+    ///         commitment via the ZK identity verifier.
+    ///
+    ///         Snapshot-block recency (proposeRoot enforces
+    ///         block.number - snapshot ∈ [MIN_AGE, MAX_AGE]) ensures the
+    ///         caller's current balance is a usable proxy for the snapshot
+    ///         balance. If the proposer is honest, claimedBalance was the
+    ///         caller's balance at snapshot; if it doesn't match current
+    ///         within MAX_AGE blocks (~10 min at 6s), and we exclude the
+    ///         possibility that the caller transferred in/out during the
+    ///         window… well, we don't — the recency constraint just bounds
+    ///         the drift to a few minutes. For long-tail stable holders
+    ///         this is fine; for active traders, false positives are
+    ///         possible. See task-zk-identity-verifier.md §3a for the
+    ///         trade-off discussion and the path to ERC20Snapshot or
+    ///         storage-proof historical balances if needed.
+    ///
+    /// @param epoch             pending root epoch
+    /// @param commitment        the commitment encoded in the disputed leaf
+    /// @param claimedBalance    the balance encoded in the disputed leaf
+    /// @param leafIndex         Merkle leaf index
+    /// @param siblings          Merkle path siblings
+    /// @param identityProof     ZK proof of Poseidon(secret) == commitment;
+    ///                          256 bytes per the verifier's convention
+    function challengeRootBalance(
+        uint256 epoch,
+        bytes32 commitment,
+        uint256 claimedBalance,
+        uint256 leafIndex,
+        bytes32[] calldata siblings,
+        bytes calldata identityProof
+    ) external payable nonReentrant whenNotFrozen {
+        require(msg.value >= challengerBond, "E11");
+        require(address(identityVerifier) != address(0), "E00");
+        require(address(datumToken) != address(0), "E00");
+
+        PendingRoot storage p = _pending[epoch];
+        require(p.proposer != address(0), "E01");
+        require(!p.slashed, "E22");
+        require(block.number <= uint256(p.proposedAtBlock) + uint256(challengeWindow), "E96");
+
+        // 1. Leaf must actually be in the proposed root
+        bytes32 leaf = keccak256(abi.encodePacked(commitment, claimedBalance));
+        require(_verifyMerkle(p.root, leaf, leafIndex, siblings), "E53");
+
+        // 2. Commitment must be REGISTERED (otherwise this is a phantom-leaf
+        //    case — caller should use challengePhantomLeaf instead). Mutually
+        //    exclusive challenge paths so we don't double-slash.
+        require(registeredCommitments[commitment], "E53");
+
+        // 3. Caller must prove ownership of the commitment in ZK.
+        require(identityVerifier.verifyIdentity(identityProof, commitment), "E53");
+
+        // 4. Caller's current DATUM balance must differ from the leaf-claimed
+        //    balance. Recency constraint on snapshotBlock (enforced at
+        //    proposeRoot) bounds the drift.
+        uint256 actualBalance = datumToken.balanceOf(msg.sender);
+        require(actualBalance != claimedBalance, "E53");
+
+        // Refund challenger bond, then slash proposer + approvers.
+        _queuePayout(msg.sender, msg.value);
+        _slashProposer(epoch, msg.sender);
+    }
+
+    function _verifyMerkle(
+        bytes32 root,
+        bytes32 leaf,
+        uint256 index,
+        bytes32[] calldata siblings
+    ) internal pure returns (bool) {
+        bytes32 hash = leaf;
+        uint256 idx = index;
+        for (uint256 i = 0; i < siblings.length; i++) {
+            bytes32 sib = siblings[i];
+            if (idx & 1 == 0) {
+                hash = keccak256(abi.encodePacked(hash, sib));
+            } else {
+                hash = keccak256(abi.encodePacked(sib, hash));
+            }
+            idx >>= 1;
+        }
+        return hash == root;
+    }
+
+    function _slashProposer(uint256 epoch, address challenger) internal {
+        PendingRoot storage p = _pending[epoch];
+        p.slashed = true;
+
+        uint256 totalSlash = uint256(p.proposerBond);
+        // Audit-5 H3: skip the `totalReporterStake -= cut` for exit-proposed
+        // reporters. Their stake was ALREADY subtracted from totalReporterStake
+        // at proposeReporterExit time; subtracting again would underflow.
+        // Still slash their per-reporter `amount` — the bond is at risk
+        // regardless of exit status (must remain so or exit-propose becomes
+        // a slash-immunity gambit).
+
+        // F-030 fix (2026-05-20): iterate the per-epoch approver list
+        // instead of the full reporterList. Previous O(reporterList.length)
+        // could exceed block gas with permissionless joining; now bounded
+        // to actual approvers for this specific epoch. Proposer is also
+        // in this list (pushed during proposeRoot) so the separate
+        // proposer-slash branch below is unnecessary — the loop covers
+        // them too. We dedupe by reading `_approvedBy[epoch][r]` to skip
+        // any hypothetical double-entry.
+        address[] storage approvers = _approversByEpoch[epoch];
+        for (uint256 i = 0; i < approvers.length; i++) {
+            address r = approvers[i];
+            if (!_approvedBy[epoch][r]) continue;       // defensive
+            _approvedBy[epoch][r] = false;              // dedupe across the loop
+            uint256 cut = reporterStake[r].amount * uint256(slashApproverBps) / 10000;
+            if (cut > 0) {
+                reporterStake[r].amount -= cut;
+                if (reporterStake[r].exitProposedBlock == 0) {
+                    totalReporterStake -= cut;
+                }
+                totalSlash += cut;
+                emit ApproverSlashed(epoch, r, cut);
+            }
+        }
+
+        uint256 toChallenger = totalSlash * uint256(slashedToChallengerBps) / 10000;
+        uint256 toTreasury = totalSlash - toChallenger;
+        if (toChallenger > 0) _queuePayout(challenger, toChallenger);
+        if (toTreasury > 0) _queuePayout(treasury, toTreasury);
+
+        emit RootSlashed(epoch, challenger, totalSlash);
+    }
+
+    // ── Pull-pattern claim ───────────────────────────────────────────────────
+    function claim() external nonReentrant {
+        _claim(msg.sender, msg.sender);
+    }
+    function claimTo(address recipient) external nonReentrant {
+        require(recipient != address(0), "E00");
+        _claim(msg.sender, recipient);
+    }
+    function _claim(address account, address recipient) internal {
+        uint256 amount = _pendingPayout[account];
+        require(amount > 0, "E03");
+        _pendingPayout[account] = 0;
+        emit PayoutClaimed(recipient, amount);
+        _safeSend(recipient, amount);
+    }
+    function pending(address account) external view returns (uint256) {
+        return _pendingPayout[account];
+    }
+
+    // ── IBroadsideStakeRoot view: isRecent ───────────────────────────────────────
+    function isRecent(bytes32 root) external view override returns (bool) {
+        if (divergenceBreakerTripped) return false; // freeze stake-gated settlement
+        if (root == bytes32(0)) return false;
+        uint256 start = latestEpoch < LOOKBACK_EPOCHS ? 0 : latestEpoch - LOOKBACK_EPOCHS + 1;
+        for (uint256 e = start; e <= latestEpoch; e++) {
+            if (rootAt[e] == root) return true;
+        }
+        return false;
+    }
+
+    // ── Pending-root views (debug + UI) ──────────────────────────────────────
+    function pendingRoot(uint256 epoch) external view returns (
+        bytes32 root,
+        uint64  proposedAtBlock,
+        uint64  snapshotBlock,
+        address proposer,
+        uint128 proposerBond_,
+        uint256 approvedStake,
+        bool    slashed
+    ) {
+        PendingRoot storage p = _pending[epoch];
+        return (p.root, p.proposedAtBlock, p.snapshotBlock, p.proposer,
+                p.proposerBond, p.approvedStake, p.slashed);
+    }
+    function hasApproved(uint256 epoch, address who) external view returns (bool) {
+        return _approvedBy[epoch][who];
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Upgrade migration (reporters + stakes + roots + commitments + payouts)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function committedEpochCount() external view returns (uint256) { return _committedEpochs.length; }
+    function committedEpochAt(uint256 i) external view returns (uint256) { return _committedEpochs[i]; }
+    function commitmentListLength() external view returns (uint256) { return commitmentList.length; }
+    function payoutHolderCount() external view returns (uint256) { return _payoutHolders.length; }
+    function payoutHolderAt(uint256 i) external view returns (address) { return _payoutHolders[i]; }
+
+    /// @dev Copy params + treasury + reporter set (stake + lastActiveBlock) +
+    ///      finalized roots + registered commitments + pending payouts from a
+    ///      frozen predecessor. In-flight (unfinalized) pending roots + their
+    ///      approver state are transient and NOT migrated — reporters re-propose.
+    ///      identityVerifier is re-wired; datumToken is constructor-immutable.
+    ///      Native DOT (stakes + payouts + bonds) moves via `migrateFundsTo`.
+    function _migrate(address oldContract) internal override {
+        BroadsideStakeRootV2 old = BroadsideStakeRootV2(payable(oldContract));
+        reporterMinStake = old.reporterMinStake();
+        reporterExitDelay = old.reporterExitDelay();
+        approvalThresholdBps = old.approvalThresholdBps();
+        challengeWindow = old.challengeWindow();
+        proposerBond = old.proposerBond();
+        challengerBond = old.challengerBond();
+        slashedToChallengerBps = old.slashedToChallengerBps();
+        slashApproverBps = old.slashApproverBps();
+        commitmentBond = old.commitmentBond();
+        inactivityThresholdBlocks = old.inactivityThresholdBlocks();
+        treasury = old.treasury();
+        totalReporterStake = old.totalReporterStake();
+        latestEpoch = old.latestEpoch();
+
+        uint256 rn = old.reporterCount();
+        for (uint256 i = 0; i < rn; i++) {
+            address r = old.reporterList(i);
+            (uint256 amt, uint64 joined, uint64 exitProp) = old.reporterStake(r);
+            reporterStake[r] = ReporterStake({ amount: amt, joinedAtBlock: joined, exitProposedBlock: exitProp });
+            lastActiveBlock[r] = old.lastActiveBlock(r);
+            // Replicate the predecessor's 0-based index convention (push in order).
+            _reporterIndex[r] = reporterList.length;
+            reporterList.push(r);
+        }
+        uint256 en = old.committedEpochCount();
+        for (uint256 i = 0; i < en; i++) {
+            uint256 e = old.committedEpochAt(i);
+            rootAt[e] = old.rootAt(e);
+            _committedEpochs.push(e);
+        }
+        uint256 cn = old.commitmentListLength();
+        for (uint256 i = 0; i < cn; i++) {
+            bytes32 c = old.commitmentList(i);
+            registeredCommitments[c] = old.registeredCommitments(c);
+            commitmentList.push(c);
+        }
+        uint256 pn = old.payoutHolderCount();
+        for (uint256 i = 0; i < pn; i++) {
+            address a = old.payoutHolderAt(i);
+            _pendingPayout[a] = old.pending(a);
+            if (!_payoutTracked[a]) { _payoutTracked[a] = true; _payoutHolders.push(a); }
+        }
+    }
+
+    /// @notice Sweep native DOT (reporter stakes + pending payouts + bonds) to a
+    ///         successor during an upgrade. Governance-gated, frozen-only,
+    ///         one-shot. Hand-rolled (this contract keeps its own plumbing lock).
+    function migrateFundsTo(address successor) external onlyGovernance nonReentrant {
+        require(frozen, "not frozen");
+        require(!fundsMigratedOut, "already swept");
+        require(successor != address(0), "E00");
+        fundsMigratedOut = true;
+        uint256 bal = address(this).balance;
+        emit FundsMigratedOut(successor, bal);
+        if (bal > 0) BroadsideStakeRootV2(payable(successor)).acceptMigration{value: bal}();
+    }
+
+    function acceptMigration() external payable {
+        require(msg.sender == migrationSource, "not-source");
+    }
+}

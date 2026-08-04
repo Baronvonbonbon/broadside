@@ -11,3 +11,10 @@ packages:
 # first build. Anything added here should need the same kind of justification.
 allowBuilds:
   esbuild: true
+  # Both are hardhat's crypto path and both compile native bindings for speed.
+  # Each also ships a pure-JS fallback, so the honest reason to allow them is
+  # test-suite runtime rather than necessity — DATUM's ~2,080 cases hash a great
+  # deal. They are long-standing, widely-audited packages in the Ethereum
+  # toolchain, which is the bar anything added here should clear.
+  keccak: true
+  secp256k1: true

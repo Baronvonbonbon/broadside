@@ -4,14 +4,23 @@
   "private": true,
   "description": "Broadside contracts, compiled to PolkaVM via resolc.",
   "license": "GPL-3.0-or-later",
-  "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "compile": "hardhat compile",
     "deploy": "node scripts/deploy.mjs",
-    "test": "node --test test/*.test.mjs"
+    "port": "node ../tools/port-from-datum.mjs",
+    "test": "node --test test/*.test.mjs && hardhat test"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.6.1",
     "ethers": "^6.17.0"
-  }
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@types/node": "^26.1.2",
+    "hardhat": "^2.29.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "_typeNote": "No \"type\": \"module\" \u2014 hardhat 2.x loads hardhat.config.ts through a CJS require and fails outright when the package scope declares ESM. Every script here is .mjs, which is ESM regardless of this field, so nothing is lost."
 }

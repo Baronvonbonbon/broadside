@@ -2,7 +2,7 @@
   "name": "broadside",
   "version": "0.1.0",
   "private": true,
-  "description": "Broadside — a peer-to-peer ad network on Polkadot. Public notice, privately served.",
+  "description": "Broadside \u2014 a peer-to-peer ad network on Polkadot. Public notice, privately served.",
   "license": "GPL-3.0-or-later",
   "packageManager": "pnpm@11.20.0",
   "engines": {
@@ -13,7 +13,9 @@
     "test": "turbo run test",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
-    "pvm:spike": "node tools/pvm-size-spike.mjs"
+    "pvm:spike": "node tools/pvm-size-spike.mjs",
+    "contracts:port": "node tools/port-from-datum.mjs",
+    "contracts:sizes": "node contracts/scripts/build.mjs"
   },
   "devDependencies": {
     "turbo": "^2.5.0",
