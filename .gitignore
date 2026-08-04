@@ -1,0 +1,24 @@
+node_modules/
+dist/
+.turbo/
+
+# Compiler output. The PVM size *snapshot* is committed on purpose (it is the
+# gate); the blobs it measures are not.
+artifacts/
+artifacts-pvm/
+artifacts-pvm-spike/
+cache/
+typechain-types/
+
+# resolc is an 87 MB release binary — fetched by tools/fetch-resolc.sh, never
+# committed.
+tools/resolc
+tools/checksums.txt
+tools/*.log
+
+.env
+.env.*
+!.env.example
+coverage/
+*.tsbuildinfo
+.DS_Store

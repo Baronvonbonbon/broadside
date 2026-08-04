@@ -1,0 +1,24 @@
+{
+  "name": "@broadside/protocol",
+  "version": "0.1.0",
+  "description": "Shared protocol constants: registry slots, EIP-712 types, IAB creative formats. One source of truth for contracts, widget, and services.",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
