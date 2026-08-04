@@ -1,5 +1,6 @@
 /**
- * The shell. One button, five verdicts, sixteen findings, two downloads.
+ * The shell. One button, the gate verdicts, the findings, and a way to get the
+ * report off the device that the platform cannot refuse.
  *
  * Built for a phone held by someone who did not write it: the gates are the
  * headline because they are the question, the findings are underneath because
@@ -9,7 +10,7 @@
 
 import { isInsideContainerSync } from "@parity/product-sdk";
 import { DOT_NAME, PRODUCT_ID, SOURCE_URL } from "../product.mjs";
-import { build, download, toMarkdown, type Report } from "./report";
+import { build, download, type Report } from "./report";
 import { runAll } from "./run";
 import { extend, openStore, type Baseline } from "./memory";
 import type { Finding, Status } from "./types";
@@ -160,12 +161,9 @@ function render(r: Report, findings: Finding[]): void {
   const list = el("ol", { class: "findings" });
   for (const f of findings) list.append(renderFinding(f));
 
-  const actions = el("div", { class: "actions" });
-  const json = el("button", {}, "Download JSON");
-  json.addEventListener("click", () => download(`seam-${stamp()}.report.json`, JSON.stringify(r, null, 2), "application/json"));
-  const md = el("button", {}, "Download Markdown");
-  md.addEventListener("click", () => download(`seam-${stamp()}.report.md`, toMarkdown(r), "text/markdown"));
-  actions.append(json, md);
+  // The same export row as mid-run, so there is one way to get data out and it
+  // is the one that has been exercised on every wedged run.
+  const actions = exportRow(() => findings);
 
   const caveats = el("section", { class: "caveats" });
   if (r.caveats.length) {
@@ -179,10 +177,23 @@ function render(r: Report, findings: Finding[]): void {
 }
 
 /**
- * Download buttons over whatever findings exist right now.
+ * Getting the report off the device.
+ *
+ * Download is listed last on purpose: a Blob URL driven by a synthetic anchor
+ * click **does not work in the Polkadot App's Android WebView** — there is no
+ * download manager wired to it, so the tap silently does nothing. That is not a
+ * detail to work around quietly. It means a suite whose only export was a
+ * download had, for six runs, no way to hand over the one thing it exists to
+ * produce.
+ *
+ * So the reliable path is a textarea: selectable, scrollable, and impossible
+ * for a platform to refuse. Copy-to-clipboard sits in front of it as the
+ * convenience, and falls back to selecting the text when the clipboard API is
+ * unavailable or blocked — which it often is outside a secure context.
  *
  * Takes a getter rather than an array so the same row serves a run in progress
- * and a finished one — the click reads the buffer at the moment it happens.
+ * and a finished one: the click reads the buffer at the moment it happens,
+ * which is what makes a *wedged* run exportable.
  */
 function exportRow(get: () => Finding[]): HTMLElement {
   const surface = {
@@ -191,19 +202,55 @@ function exportRow(get: () => Finding[]): HTMLElement {
     baselineStore: "unknown",
     baselineRecordedAt: null,
   };
+  const text = () => JSON.stringify(report ?? build(get(), surface), null, 2);
+
+  const wrap = el("section", { class: "export" });
   const actions = el("div", { class: "actions" });
-  const json = el("button", {}, "Download JSON");
-  json.addEventListener("click", () => {
-    const r = report ?? build(get(), surface);
-    download(`seam-${stamp()}.report.json`, JSON.stringify(r, null, 2), "application/json");
+
+  const box = el("textarea", {
+    class: "report-json",
+    readonly: "readonly",
+    spellcheck: "false",
+    "aria-label": "Report JSON",
+  }) as HTMLTextAreaElement;
+  box.hidden = true;
+
+  const note = el("span", { class: "copy-note" }, "");
+
+  const copy = el("button", {}, "Copy JSON");
+  copy.addEventListener("click", async () => {
+    const payload = text();
+    box.value = payload;
+    try {
+      await navigator.clipboard.writeText(payload);
+      note.textContent = `copied ${payload.length.toLocaleString()} chars`;
+    } catch {
+      // Blocked or absent. Reveal and select instead — the user can still copy
+      // with the OS control, which is the outcome that actually matters.
+      box.hidden = false;
+      box.focus();
+      box.select();
+      note.textContent = "clipboard blocked — text selected, copy with the OS control";
+    }
   });
-  const md = el("button", {}, "Download Markdown");
-  md.addEventListener("click", () => {
-    const r = report ?? build(get(), surface);
-    download(`seam-${stamp()}.report.md`, toMarkdown(r), "text/markdown");
+
+  const show = el("button", {}, "Show JSON");
+  show.addEventListener("click", () => {
+    box.value = text();
+    box.hidden = !box.hidden;
+    show.textContent = box.hidden ? "Show JSON" : "Hide JSON";
+    if (!box.hidden) box.scrollIntoView({ block: "nearest" });
   });
-  actions.append(json, md);
-  return actions;
+
+  const dl = el("button", { class: "secondary" }, "Download");
+  dl.addEventListener("click", () => {
+    download(`seam-${stamp()}.report.json`, text(), "application/json");
+    note.textContent = "if nothing happened, the WebView blocked it — use Copy or Show";
+  });
+
+  actions.append(copy, show, dl);
+  wrap.append(actions, note, box);
+  return wrap;
 }
 
 function renderFinding(f: Finding): HTMLElement {
