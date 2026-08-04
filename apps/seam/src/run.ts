@@ -42,7 +42,15 @@ export async function runAll(opts: RunOptions = {}): Promise<Finding[]> {
     const finding = await runOne(check, { found, shared, signal: new AbortController().signal, mark: () => {} });
     found.set(finding.id, finding);
     findings.push(finding);
-    opts.onProgress?.(finding, i, CHECKS.length);
+    try {
+      opts.onProgress?.(finding, i, CHECKS.length);
+    } catch (e) {
+      // The runner's whole promise is that no single check can wedge the suite.
+      // That promise was void while a throw in the progress callback could
+      // unwind the loop — and one did, for six runs, disguised as a hang.
+      // Reporting a result is not allowed to be the thing that stops the run.
+      finding.data = { ...(finding.data ?? {}), renderError: String(e) };
+    }
   }
 
   // Best effort: leaving a host connection open past the run is exactly the

@@ -306,6 +306,37 @@ the strength of it never answering. That is a false positive of exactly the kind
 avoid. 1.3.0 separates a third bucket, `noAnswer`, and says plainly that an absent answer is not
 evidence of anything.
 
+### The "hang" was never a hang
+
+`chain.contractRead` appeared to stall on every run from the first onwards, and it cost six versions
+of increasingly elaborate instrumentation to find out why. The answer was not in the network at all.
+
+`decodeResult("chainId", …)` returns what ethers decodes a `uint256` to — a **BigInt**. That lands in
+the finding's `data`, and `JSON.stringify` **throws** on a BigInt rather than skipping it. The
+exception escaped the progress callback, unwound the run loop, and left the in-flight row on screen
+permanently.
+
+Every symptom follows from that, and each one had been read as evidence for something else:
+
+| symptom | what it was taken for | what it was |
+|---|---|---|
+| row never resolves | a network hang | the run had already ended, mid-callback |
+| elapsed counter froze | timers throttled by the WebView | nothing was left scheduling it |
+| the check's own timeout never fired | a blocked event loop | the check had already *finished*, successfully |
+| Copy JSON still worked | the event loop was alive, so not blocking | true, and it made the timer theory incoherent — that was the clue |
+
+The instrumentation added while chasing it was not wasted — the in-flight row, the elapsed counter,
+the breadcrumbs and the mid-run export are all worth having — but none of it was going to find this,
+because all of it assumed the failure was *inside* the check.
+
+Fixed three ways, because one is not enough: `safeStringify` converts BigInts, `Uint8Array`s and
+`Error`s instead of throwing; the progress callback is wrapped so a render fault is recorded on the
+finding rather than ending the run; and the runner's promise that no single check can wedge the suite
+is now actually true, where before it was void the moment reporting a result could throw.
+
+**The lesson worth keeping:** six rounds of reasoning from the outside produced six wrong answers, and
+the one fact that contradicted all of them — that the UI stayed responsive — was visible from run 3.
+
 ### Run 3 also stalled, and the UI could not say where
 
 The run reached `Running… 14/17` and stopped visibly progressing. That count reports *completed*

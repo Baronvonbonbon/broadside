@@ -6,7 +6,7 @@
 | Phase | | Status |
 |---|---|---|
 | 0 | PolkaVM size survey | ✅ done — [`phase0-pvm-size-report.md`](phase0-pvm-size-report.md) |
-| 1 | The seam probe | 🟡 built — needs a deploy and a device run |
+| 1 | The seam probe | 🟡 5 of 6 gates pass — one run from done |
 | 2 | Contracts: the alpha spine on PolkaVM | ⬜ not started |
 | 3 | Core widget and settlement services | ⬜ not started |
 | 4 | First Product publisher | ⬜ not started |
@@ -201,26 +201,23 @@ until republished.
 - [x] [`phase1-seam-report.md`](phase1-seam-report.md) part 1 — the chain side
 - [x] `broadside.dot` registered and published — <https://broadside.dev-dot.li>, CID
       `bafybeifqyvii2d…`, owned by `0xff54a5a1…`. See [`DEPLOY.md`](DEPLOY.md)
-- [ ] part 2 of the report — the host side, from a device run **← the only thing left**
+- [x] part 2 of the report — the host side, measured across nine device runs
+- [ ] one clean run on suite 1.9.0 to close the last three gates
 
-**Gate** — measured on a Pixel 10 Pro XL across two sessions, 2026-08-04:
-- [x] `deriveEntropy` is deterministic *in a published bundle* — same burner
-      `0xC9dbB624…` before and after a full app close
-- [ ] ~~`getAnonymousAlias()` is stable per product~~ — **the call returns null; the primitive does
-      not exist.** `getUserId()` returns a global username instead, which is the opposite property.
-      See the identity correction above
-- [x] `getProductAccount` returns distinct keys per index — 4 indices, 4 distinct keys
-- [ ] The host provider reaches the chain — **no**: `Chain 0xbf0488db… is not supported by the
-      current host`. An external RPC *is* reachable from inside the WebView (823 ms), so this splits
-      into "can read at all" (yes) and "host-routed" (no on this build)
-- [ ] A burner-signed EIP-712 payload survives on-chain `ecrecover` — contract half proven from Node,
-      host half **unanswered because of a probe bug**: `contractRead` depended on the host transport
-      and skipped with it, though the control path could have answered. Fixed in suite 1.1.0
-
-Gates 1 and 2 need **two runs** with a full app restart between them: within one session a cached
-value and a stable one are indistinguishable, so the first run records a baseline in the host's
-per-product store and the second compares against it. The probe reports `unanswered` until then
-rather than guessing.
+**Gate** — measured on a Pixel 10 Pro XL, suite 1.0.0 → 1.9.0:
+- [x] **`deriveEntropy` is deterministic in a published bundle** — burner `0xC9dbB624…` identical
+      across a full app close and reopen, from identical entropy
+- [x] **The Ring VRF alias is stable per product** — `0xffe0a57e…` via
+      `getProductAccountAlias({productId:"broadside.dot", suffix:Left(0)}, {chainId:<Paseo Asset
+      Hub>, junctions:[]})`, stable within a session *and* across a restart. The deprecated
+      `app.wallet.getAnonymousAlias()` returns null, which is what made three runs conclude wrongly
+- [x] **`getProductAccount` yields distinct keys per index** — 4 indices, 4 distinct keys
+- [ ] **A Product can read the deployed contract from inside the app** — blocked until now by a
+      BigInt serialization throw disguised as a hang, not by anything on the network
+- [ ] **…through the host's own provider** — `chainHead_v1_call` is not refused, but driving it needs
+      PAPI's subscription lifecycle, which this probe deliberately does not implement
+- [ ] **A burner-signed EIP-712 payload survives on-chain `ecrecover`** — proven twice from Node,
+      over eth-rpc and natively; the in-app half sits behind the same fixed bug
 
 **Risk** — highest in the plan, which is why it is first and small. **Parallel with:** Phase 2.
 

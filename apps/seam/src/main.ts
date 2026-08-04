@@ -10,7 +10,7 @@
 
 import { isInsideContainerSync } from "@parity/product-sdk";
 import { DOT_NAME, PRODUCT_ID, SOURCE_URL } from "../product.mjs";
-import { build, download, type Report } from "./report";
+import { build, download, safeStringify, type Report } from "./report";
 import { runAll } from "./run";
 import { extend, openStore } from "./memory";
 import type { Finding, Status } from "./types";
@@ -223,7 +223,7 @@ function exportRow(get: () => Finding[], baselineStore = "unknown", baselineReco
     baselineStore,
     baselineRecordedAt,
   };
-  const text = () => JSON.stringify(report ?? build(get(), surface), null, 2);
+  const text = () => safeStringify(report ?? build(get(), surface));
 
   const wrap = el("section", { class: "export" });
   const actions = el("div", { class: "actions" });
@@ -284,7 +284,7 @@ function renderFinding(f: Finding): HTMLElement {
   item.append(head, el("p", { class: "detail" }, f.detail));
   if (f.data && Object.keys(f.data).length) {
     const details = el("details", {}, el("summary", {}, "evidence"));
-    details.append(el("pre", {}, JSON.stringify(f.data, null, 2)));
+    details.append(el("pre", {}, safeStringify(f.data)));
     item.append(details);
   }
   return item;

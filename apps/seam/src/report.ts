@@ -50,6 +50,34 @@ export interface Report {
   caveats: string[];
 }
 
+/**
+ * `JSON.stringify` that survives what actually ends up in a finding.
+ *
+ * ethers decodes a `uint256` to a **BigInt**, and `JSON.stringify` throws
+ * outright on one — `TypeError: Do not know how to serialize a BigInt`. That
+ * single unhandled throw escaped onProgress, unwound the whole run, and left the
+ * in-flight row on screen forever. Six runs were spent reading it as a network
+ * hang: the elapsed counter froze because nothing was scheduling it any more,
+ * and the check's own timeout never fired because the check had already
+ * finished, successfully.
+ *
+ * A report that cannot serialize its own evidence is worse than one that omits
+ * it, so this converts rather than throws — and does the same for the other two
+ * shapes that reach here from the host bridge.
+ */
+export function safeStringify(value: unknown, indent = 2): string {
+  return JSON.stringify(
+    value,
+    (_k, v) => {
+      if (typeof v === "bigint") return `${v}`;
+      if (v instanceof Uint8Array) return `0x${Array.from(v, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+      if (v instanceof Error) return `${v.name}: ${v.message}`;
+      return v;
+    },
+    indent,
+  );
+}
+
 export function build(findings: Finding[], surface: Report["surface"]): Report {
   return {
     suite: "broadside-seam",
@@ -164,7 +192,7 @@ export function toMarkdown(r: Report): string {
     L.push(`*Why it matters:* ${f.why}`, "");
     L.push(f.detail, "");
     if (f.data && Object.keys(f.data).length) {
-      L.push("```json", JSON.stringify(f.data, null, 2), "```", "");
+      L.push("```json", safeStringify(f.data), "```", "");
     }
   }
 
