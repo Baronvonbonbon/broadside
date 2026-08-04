@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@parity/product-sdk": "^0.20.0",
+    "@parity/product-sdk-contracts": "^0.10.0",
     "@parity/product-sdk-descriptors": "^0.8.0",
     "@parity/product-sdk-host": "^0.15.0",
     "@parity/truapi": "^0.6.0",

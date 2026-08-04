@@ -27,6 +27,8 @@ export const DOT_NAME = `${PRODUCT_ID}.dot`;
 // a chain a devnet build does not carry, and createApp throws.
 export const CLOUD_ENV = "devnet";
 
+// 2.0.0 — chain.readMatrix tries every documented read path side by side, each
+// under its own deadline, instead of one transport per version.
 // 1.9.0 — the six-run "hang" was an unhandled BigInt in JSON.stringify escaping
 // onProgress. Serialization is BigInt-safe and a render error cannot end a run.
 // 1.8.0 — the baseline persists per check rather than only on a clean finish;
@@ -46,7 +48,7 @@ export const CLOUD_ENV = "devnet";
 // 1.1.0 — sweeps the chains the host actually carries instead of assuming
 // truapi's two; stops gate 5 inheriting the host transport's failure; reports
 // getUserId as a privacy hazard rather than a capability.
-export const SUITE_VERSION = "1.9.0";
+export const SUITE_VERSION = "2.0.0";
 
 export const SOURCE_URL = "https://github.com/Baronvonbonbon/broadside";
 

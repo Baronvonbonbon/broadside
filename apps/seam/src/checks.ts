@@ -23,6 +23,7 @@ import {
 import { deriveBurner, hostEntropy, keyFromEntropy } from "./burner";
 import { HostRpc, ethCall, ethChainId, type Hex } from "./chain";
 import { ASSET_HUBS, KNOWN_CHAINS } from "./chains";
+import { runReadPaths } from "./readpaths";
 import type { Baseline } from "./memory";
 import {
   CONTRACT_ADDRESS,
@@ -719,11 +720,75 @@ const controlRpc: Check = {
   },
 };
 
+/**
+ * The read matrix.
+ *
+ * Replaces nine runs of trying one transport per version. Every candidate is
+ * attempted under its own deadline and the whole table is reported, because
+ * which paths fail *together* says more than any single result: if the SDK
+ * paths fail and the control succeeds, the host route is the problem; if all
+ * four fail, the contract or the calldata is.
+ */
+const readMatrix: Check = {
+  id: "chain.readMatrix",
+  title: "Every way to read the contract, side by side",
+  why: "The host allows chainHead_v1_call but delivers its result as a notification on a follow subscription — a lifecycle a hand-rolled client cannot drive. PAPI can, and the product-sdk-contracts paths sit on PAPI. This measures whether the supported client already does it inside this host.",
+  gates: ["chainReachable"],
+  needs: [],
+  // Four paths at 20 s each, worst case, plus slack. Deliberately generous:
+  // this check exists to produce a complete table, not to be quick.
+  timeoutMs: 100_000,
+  async run(ctx) {
+    if (!CONTRACT_ADDRESS) {
+      return skipped("BroadsideSeam is not deployed.", "no-address-configured");
+    }
+    ctx.mark("matrix: start");
+    const results = await runReadPaths(ctx.shared.app as App | undefined);
+    for (const r of results) ctx.mark(`${r.path} → ${r.ok ? `ok ${r.value}` : r.error?.slice(0, 60)} (${r.ms}ms)`);
+
+    const winners = results.filter((r) => r.ok);
+    const expected = CONTRACT_CHAIN_ID != null ? String(CONTRACT_CHAIN_ID) : null;
+    const correct = winners.filter((r) => expected == null || r.value === expected);
+    const hostPaths = winners.filter((r) => !r.path.startsWith("D"));
+
+    const data = {
+      results,
+      expectedChainId: expected,
+      working: winners.map((r) => r.path),
+      hostRoutedWorks: hostPaths.length > 0,
+    };
+
+    if (!winners.length) {
+      return bad(
+        `No path read the contract. Control included, so this is not a host-transport finding — check the address, the ABI, and that the chain still carries the deployment.`,
+        "host-call-failed",
+        data,
+      );
+    }
+    if (!correct.length) {
+      return bad(
+        `A path returned, but not the expected chainId ${expected}. Every EIP-712 signature bound to that id would fail here while looking well-formed.`,
+        "recovery-mismatch",
+        data,
+      );
+    }
+
+    ctx.shared.readVia = correct[0]!.path.startsWith("D") ? "control" : "host";
+    ctx.shared.readPath = correct[0]!.path;
+    return ok(
+      hostPaths.length
+        ? `${correct.length} of ${results.length} paths work, including a host-routed one: ${hostPaths[0]!.path}. No external endpoint required.`
+        : `Only the external endpoint works (${correct.length}/${results.length}). A Product can read the contract, but not through the host — the censorship story is not available on this build.`,
+      data,
+    );
+  },
+};
+
 const contractRead: Check = {
   id: "chain.contractRead",
-  title: "Read the deployed contract",
-  why: "Proves the address holds code on the chain the signature will be bound to. A domain separator built against the wrong chain id produces signatures that are valid-looking and never match.",
-  gates: ["chainReachable"],
+  title: "Read the deployed contract — single-path detail",
+  why: "Superseded as a gate by chain.readMatrix, which tries every transport. Kept because its per-attempt timings are finer-grained than the matrix's, and because dropping a check that once looked broken hides the evidence that it is not.",
+  gates: [],
   // Deliberately depends on nothing. Run 1 gated this on chain.hostTransport,
   // so when the host could not serve the chain this skipped — and took gate 5
   // with it — even though the control path was working and could have answered
@@ -841,24 +906,14 @@ const recoverOnChain: Check = {
     if (!CONTRACT_ADDRESS) return skipped("BroadsideSeam is not deployed.", "no-address-configured");
 
     const calldata = encodeRecover(signed.value, signed.signature);
-    const via = ctx.shared.readVia as string | undefined;
-    let raw: string | null = null;
-    let error: string | null = null;
-
-    if (via === "host") {
-      const rpc = ctx.shared.hostRpc as HostRpc;
-      const r = await rpc.call("eth_call", [{ to: CONTRACT_ADDRESS, data: calldata }, "latest"]);
-      if (r.ok) raw = String(r.result);
-      else error = r.error?.message ?? "call failed";
-    } else if (via === "control" && ETH_RPC_URL) {
-      const r = await ethCall(ETH_RPC_URL, CONTRACT_ADDRESS, calldata);
-      if (r.ok) raw = String(r.result);
-      else error = r.error?.message ?? "call failed";
-    } else {
-      return skipped("No working transport established.");
-    }
-
-    if (raw == null) return bad(`eth_call failed: ${error}`, "host-call-failed", { via, error });
+    // Uses the control endpoint regardless of which path the matrix preferred:
+    // this check is about ecrecover, not about transport, and mixing the two
+    // questions is what made gate 5 unanswerable for nine runs.
+    const via = (ctx.shared.readPath as string | undefined) ?? "control";
+    if (!ETH_RPC_URL) return skipped("No endpoint configured to submit the recovery call.", "no-address-configured");
+    const r = await ethCall(ETH_RPC_URL, CONTRACT_ADDRESS, calldata, 10_000);
+    const raw = r.ok ? String(r.result) : null;
+    if (raw == null) return bad(`eth_call failed: ${r.error?.message}`, "host-call-failed", { via, error: r.error?.message });
 
     const decoded = decodeResult("recover", raw);
     if (!decoded.ok) {
@@ -931,6 +986,7 @@ export const CHECKS: Check[] = [
   hostTransport,
   hostMethods,
   controlRpc,
+  readMatrix,
   contractRead,
   signLocal,
   recoverOnChain,
