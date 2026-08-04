@@ -65,10 +65,23 @@ the signer's own balance would have been wrong.
 
 ```bash
 pnpm --filter @broadside/seam build
-pnpm --filter @broadside/seam check-identity broadside.dot --env devnet
-pnpm dlx @polkadot-community-foundation/polkadot-app-deploy@latest \
-    ./apps/seam/dist broadside.dot --env devnet --js-merkle
+cd apps/seam && pnpm deploy:dot          # check-identity, then pad
 ```
+
+### Use `npx`, not `pnpm dlx`
+
+`deploy:dot` shells out to **`npx`** deliberately. `pad` imports
+`@polkadot-api/json-rpc-provider` without declaring it — a phantom dependency that npm's flat
+`node_modules` happens to satisfy and pnpm's strict layout correctly refuses:
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@polkadot-api/json-rpc-provider'
+  imported from …/@polkadot-api/json-rpc-provider-proxy/dist/get-proxy.js
+```
+
+pnpm is right and the fix is not ours to make, so the script pins the resolver that works. Running
+the CLI by hand, use `npx --yes …`, and watch for a stray `\` before the path — outside a line
+continuation it escapes a space and turns `./dist` into ` ./dist`.
 
 ### Republishing needs a phone — the first publish did not
 

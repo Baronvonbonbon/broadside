@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "preview": "vite preview --host",
     "sync-abi": "node scripts/sync-abi.mjs",
-    "check-identity": "node scripts/check-identity.mjs"
+    "check-identity": "node scripts/check-identity.mjs",
+    "deploy:dot": "node scripts/check-identity.mjs broadside.dot --env devnet && npx --yes @polkadot-community-foundation/polkadot-app-deploy@latest ./dist broadside.dot --env devnet --js-merkle"
   },
   "dependencies": {
     "@parity/product-sdk": "^0.20.0",
