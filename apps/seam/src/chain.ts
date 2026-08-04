@@ -16,7 +16,6 @@
  */
 
 import { getHostProvider } from "@parity/product-sdk-host";
-import { JsonRpcProvider as EthProvider } from "ethers";
 
 export type Hex = `0x${string}`;
 
@@ -102,36 +101,56 @@ export class HostRpc {
   }
 }
 
-/** The control path: a plain Ethereum RPC, reached by ordinary fetch. */
-export async function ethCall(url: string, to: string, data: string, timeoutMs = 12_000): Promise<RpcResult> {
-  const provider = new EthProvider(url, undefined, { staticNetwork: true });
+/**
+ * The control path: a plain Ethereum RPC, by raw `fetch`.
+ *
+ * This used ethers' `JsonRpcProvider` and `chain.contractRead` stalled three
+ * runs in a row on it, while the identical call succeeded from Node against the
+ * same endpoint and calldata. Rather than keep guessing at network detection,
+ * request batching, and the provider's own polling and teardown, the probe now
+ * issues the JSON-RPC POST itself.
+ *
+ * The point is not that it is smaller. It is that `AbortController` **actually
+ * cancels the request**, where `Promise.race` only stops waiting for it — and
+ * "the losing promise is still pending" is precisely the caveat every previous
+ * timeout in this suite had to carry. Here there is nothing left running.
+ *
+ * ethers is still used for ABI encoding and signing, which touch no network.
+ */
+async function jsonRpc(url: string, method: string, params: unknown[], timeoutMs: number): Promise<RpcResult> {
   const t0 = performance.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const result = await withTimeout(provider.call({ to, data }), timeoutMs);
-    return { ok: true, result, ms: Math.round(performance.now() - t0) };
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      signal: controller.signal,
+    });
+    const ms = Math.round(performance.now() - t0);
+    if (!res.ok) return { ok: false, error: { message: `HTTP ${res.status}` }, ms };
+    const body = (await res.json()) as { result?: unknown; error?: { code?: number; message: string } };
+    if (body.error) return { ok: false, error: body.error, ms };
+    return { ok: true, result: body.result, ms };
   } catch (e) {
-    return { ok: false, error: { message: (e as Error).message }, ms: Math.round(performance.now() - t0) };
+    const ms = Math.round(performance.now() - t0);
+    const aborted = (e as Error).name === "AbortError";
+    return {
+      ok: false,
+      error: { message: aborted ? `aborted after ${timeoutMs} ms` : `${(e as Error).name}: ${(e as Error).message}` },
+      ms,
+    };
   } finally {
-    provider.destroy();
+    clearTimeout(timer);
   }
+}
+
+export function ethCall(url: string, to: string, data: string, timeoutMs = 12_000): Promise<RpcResult> {
+  return jsonRpc(url, "eth_call", [{ to, data }, "latest"], timeoutMs);
 }
 
 export async function ethChainId(url: string, timeoutMs = 12_000): Promise<RpcResult> {
-  const provider = new EthProvider(url, undefined, { staticNetwork: true });
-  const t0 = performance.now();
-  try {
-    const net = await withTimeout(provider.getNetwork(), timeoutMs);
-    return { ok: true, result: Number(net.chainId), ms: Math.round(performance.now() - t0) };
-  } catch (e) {
-    return { ok: false, error: { message: (e as Error).message }, ms: Math.round(performance.now() - t0) };
-  } finally {
-    provider.destroy();
-  }
-}
-
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms)),
-  ]);
+  const r = await jsonRpc(url, "eth_chainId", [], timeoutMs);
+  return r.ok ? { ...r, result: Number(r.result) } : r;
 }

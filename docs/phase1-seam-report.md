@@ -55,7 +55,40 @@ This is the load-bearing one. The key is regenerated from the host on demand —
 no export, nothing for a viewer to lose. It survives a restart, which is the claim a single session
 could not have distinguished from a cache.
 
-### Gate 2 — reopened: the alias exists, the probe asked the wrong object
+### Gate 2 — the alias exists, is stable, and is derived against the Asset Hub
+
+Run 5, suite 1.4.0:
+
+```
+broadside.dot @ devnet-asset-hub  →  ok — alias 0xffe0a57ef66b8374…
+```
+
+**First attempt, first candidate.** The context is `{ productId: "broadside.dot", suffix: {tag:"Left",
+value:0} }` and the ring location is `{ chainId: <Paseo Asset Hub genesis>, junctions: [] }` — an
+empty junction path against the chain the host already carries. No individuality chain, no pallet
+instance, no collection id. The ring is simply there.
+
+The probe reported it as **"fresh on every call"**, and that was a bug in the probe, not a property
+of the alias. Its own evidence disproves it: the first call was recorded as the hex string
+`0xffe0a57ef66b83741e9a…` and the second as raw bytes `{0:255, 1:224, 2:165, 3:126, 4:246, 5:107,
+6:131, 7:116, …}` — `ff e0 a5 7e f6 6b 83 74`, the same value. One call site normalised to hex and
+the other did not, so a string was compared against a `Uint8Array` and could never match. Fixed in
+1.5.0, where both go through one helper that also handles the index-keyed object form bytes take
+when they cross the host bridge.
+
+So the alias is **stable within a session**. Whether it survives a restart is what
+`alias.crossSession` will say once it stops being skipped behind the false failure.
+
+**What this changes.** If it holds across sessions, the viewer pseudonym is a genuine platform
+primitive — a Ring VRF alias scoped to `(product, ring)` — rather than a convention Broadside
+maintains. `createRingVRFProof(context, location, message)` sits beside it on the same interface and
+binds a message to that context, which is the shape a verified-tier attestation would need.
+
+**What it does not change.** `getUserId()` still returns a global username. An alias a Product
+*chooses* to use does not prevent that Product from also reading the handle, so unlinkability remains
+contingent on Broadside declining to make that call.
+
+### Gate 2, as reopened — the probe asked the wrong object
 
 > **Correction.** Runs 1–4 concluded *"the Ring VRF alias does not exist in this runtime"* from
 > `app.wallet.getAnonymousAlias()` returning `null`. That call is the **deprecated** surface. The

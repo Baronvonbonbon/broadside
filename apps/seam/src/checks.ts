@@ -272,6 +272,25 @@ const aliasInSession: Check = {
  * location is *right* and this user is not enrolled in the ring — which is the
  * personhood question, and a completely different answer.
  */
+/**
+ * `ContextualAlias.alias` arrives as a Uint8Array — the SDK decodes truapi's
+ * HexString fields to bytes. Both call sites go through here so neither can
+ * compare a hex string against raw bytes and conclude they differ.
+ */
+function aliasHex(value: unknown): string {
+  const a = (value as { alias?: unknown } | null)?.alias;
+  if (typeof a === "string") return a.toLowerCase();
+  if (a instanceof Uint8Array) return toHex(a).toLowerCase();
+  // Structured-cloned bytes cross the host bridge as a plain index-keyed object.
+  if (a && typeof a === "object") {
+    const keys = Object.keys(a).filter((k) => /^\d+$/.test(k));
+    if (keys.length) {
+      return toHex(Uint8Array.from(keys.sort((x, y) => Number(x) - Number(y)).map((k) => (a as Record<string, number>)[k]))).toLowerCase();
+    }
+  }
+  return String(a ?? "");
+}
+
 const productAlias: Check = {
   id: "alias.productAccountAlias",
   title: "Ring VRF alias — getProductAccountAlias",
@@ -305,8 +324,7 @@ const productAlias: Check = {
           ),
         );
         if (r.ok) {
-          const value = r.value as { alias?: unknown; context?: unknown };
-          alias = typeof value.alias === "string" ? value.alias : toHex(value.alias as Uint8Array);
+          alias = aliasHex(r.value);
           attempts[label] = `ok — alias ${alias.slice(0, 18)}…`;
           winner = label;
           break outer;
@@ -341,9 +359,11 @@ const productAlias: Check = {
         { chainId: ringChains.find((c) => winner.endsWith(c.descriptor))!.genesis, junctions: [] },
       ),
     );
-    const secondAlias = second.ok
-      ? ((second.value as { alias?: unknown }).alias as string) ?? null
-      : null;
+    // Normalised through the same helper as the first call. 1.4.0 hexed one
+    // side and not the other, compared a string to a Uint8Array, and reported a
+    // stable alias as "fresh on every call" — a false negative on the single
+    // question the check exists to answer.
+    const secondAlias = second.ok ? aliasHex(second.value) : null;
     const stable = secondAlias === alias;
 
     return stable

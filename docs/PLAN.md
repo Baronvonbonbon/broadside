@@ -82,11 +82,11 @@ third one the plan expected does not exist:
    restart** — the burner regenerates from nothing: no seed, no backup, no export.
 2. **Payout lands on a product account** (`getProductAccount(productId, index)`), which yields
    distinct keys per index — **measured**, four indices, four distinct keys.
-3. **Ring VRF alias — reopened.** `app.wallet.getAnonymousAlias()` returns `null`, but that call is
-   *deprecated*. The supported surface is `AccountsProvider.getProductAccountAlias(context,
-   ringLocation)`, which has been in the installed SDK all along. Whether it yields a stable
-   per-product pseudonym is unanswered until suite 1.4.0 runs — the earlier "the primitive is not
-   there" was inferred from the wrong object.
+3. **Ring VRF alias — it exists.** `AccountsProvider.getProductAccountAlias({productId:"broadside.dot",
+   suffix:{tag:"Left",value:0}}, {chainId:<Paseo Asset Hub>, junctions:[]})` returns a
+   `ContextualAlias`, stable across calls within a session. The deprecated
+   `app.wallet.getAnonymousAlias()` returns `null`, which is what made three runs conclude the
+   primitive was absent. Cross-session stability is the one thing still outstanding.
 
 **The unlinkability is ours, not the platform's.** `getUserId()` returns a stable, human-readable,
 *global* username (`primaryUsername`), readable by any Product and identical across all of them. So a
@@ -534,7 +534,8 @@ this inherits).
 
 | Unknown | Blocks | Fallback if unfavourable |
 |---|---|---|
-| **Does `getProductAccountAlias` yield a stable per-product alias, and against which ring?** | the identity model | Reopened — `getAnonymousAlias()` is the deprecated call, and its `null` proved nothing. Suite 1.4.0 sweeps ring locations. `NotMember` would mean the alias is real and gated on personhood enrolment, making the tier boundary a platform mechanism instead of one we build. If no ring resolves, the per-product derived burner remains the pseudonym — Broadside's construction, as today. |
+| ~~Does `getProductAccountAlias` yield an alias, and against which ring?~~ | — | **Answered: yes, first try.** `{productId:"broadside.dot", suffix:Left(0)}` against the Paseo Asset Hub genesis with an **empty junction path** — no individuality chain, no pallet instance. Stable across calls. |
+| **Does the alias survive an app restart?** | the identity model | The last open question of Phase 1. Stable → the viewer pseudonym is a platform primitive, not a Broadside convention, and `createRingVRFProof` on the same interface is the shape a verified-tier attestation needs. Fresh → the derived burner stays the pseudonym, as today. |
 | ~~Does `getUserId()` exist and return something stable?~~ | — | **Answered: yes, and it is a global username.** Not a capability to build on — a hazard to quarantine. It is also the only thing a global rate limit could key on, which is the anonymous/verified tier boundary. |
 | ~~Can the host provider reach pallet-revive?~~ | — | **Answered: not for `paseo-asset-hub` on this build.** An external `eth-rpc` endpoint *is* reachable from inside the WebView. `pine-rpc` remains the option that keeps verification without the host. |
 | ~~Which chains does this host build carry?~~ | — | **Answered: `devnet-asset-hub`, and nothing else** — but that descriptor *is* Paseo Asset Hub, so the host carries exactly the chain our contracts are on. The first reading of this, that the contracts were stranded, was wrong; see the correction in the report. |
