@@ -69,7 +69,12 @@ async function start(): Promise<void> {
   const baseline = await store.read();
 
   const list = el("ol", { class: "findings" });
-  out.replaceChildren(list);
+  // Export is available from the first check, not only at the end. Four runs
+  // wedged partway and each one's evidence was unreachable because the download
+  // lived behind a completed run — so the most useful data in the suite was the
+  // data it refused to hand over.
+  const partial: Finding[] = [];
+  out.replaceChildren(exportRow(() => partial), list);
 
   // A row for the check that is *about* to run, replaced by its result when it
   // settles. Without it the only thing on screen during a stall is a count of
@@ -105,6 +110,7 @@ async function start(): Promise<void> {
     },
     onProgress(f) {
       clearInterval(ticker);
+      partial.push(f);
       const row = renderFinding(f);
       if (pending) pending.replaceWith(row);
       else list.append(row);
@@ -170,6 +176,34 @@ function render(r: Report, findings: Finding[]): void {
   }
 
   out.replaceChildren(gates, actions, el("h2", {}, "Findings"), list, caveats);
+}
+
+/**
+ * Download buttons over whatever findings exist right now.
+ *
+ * Takes a getter rather than an array so the same row serves a run in progress
+ * and a finished one — the click reads the buffer at the moment it happens.
+ */
+function exportRow(get: () => Finding[]): HTMLElement {
+  const surface = {
+    userAgent: navigator.userAgent,
+    inContainer: isInsideContainerSync(),
+    baselineStore: "unknown",
+    baselineRecordedAt: null,
+  };
+  const actions = el("div", { class: "actions" });
+  const json = el("button", {}, "Download JSON");
+  json.addEventListener("click", () => {
+    const r = report ?? build(get(), surface);
+    download(`seam-${stamp()}.report.json`, JSON.stringify(r, null, 2), "application/json");
+  });
+  const md = el("button", {}, "Download Markdown");
+  md.addEventListener("click", () => {
+    const r = report ?? build(get(), surface);
+    download(`seam-${stamp()}.report.md`, toMarkdown(r), "text/markdown");
+  });
+  actions.append(json, md);
+  return actions;
 }
 
 function renderFinding(f: Finding): HTMLElement {

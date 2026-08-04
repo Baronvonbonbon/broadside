@@ -725,7 +725,7 @@ const contractRead: Check = {
   // it. A check that can succeed by another route must not inherit the failure
   // of the route it did not need.
   needs: [],
-  timeoutMs: 25_000,
+  timeoutMs: 15_000,
   async run(ctx) {
     if (!CONTRACT_ADDRESS) {
       return skipped(
@@ -733,22 +733,29 @@ const contractRead: Check = {
         "no-address-configured",
       );
     }
+    ctx.mark("entered");
     const calldata = encodeChainId();
+    ctx.mark(`encoded calldata ${calldata.slice(0, 12)}`);
     const attempts: Record<string, unknown> = {};
 
     if (ctx.shared.hostSpeaksEth) {
+      ctx.mark("host eth_call: start");
       const rpc = ctx.shared.hostRpc as HostRpc;
       const r = await rpc.call("eth_call", [{ to: CONTRACT_ADDRESS, data: calldata }, "latest"]);
+      ctx.mark("host eth_call: returned");
       attempts.host = r.ok ? { ...decodeResult("chainId", String(r.result)), ms: r.ms } : { ok: false, error: r.error?.message, ms: r.ms };
     }
     if (ETH_RPC_URL) {
+      ctx.mark("control eth_call: start");
       // 8 s, well inside this check's 25 s budget, so a slow endpoint produces
       // a timed attempt with evidence rather than a check that burns its whole
       // budget and reports only that it ran out.
       const r = await ethCall(ETH_RPC_URL, CONTRACT_ADDRESS, calldata, 8_000);
+      ctx.mark(`control eth_call: returned ok=${r.ok} in ${r.ms}ms`);
       attempts.control = r.ok
         ? { ...decodeResult("chainId", String(r.result)), ms: r.ms }
         : { ok: false, error: r.error?.message, ms: r.ms };
+      ctx.mark("control eth_call: decoded");
     }
 
     const winner = pickWorking(attempts);

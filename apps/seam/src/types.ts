@@ -94,6 +94,16 @@ export interface Ctx {
   /** Values passed between checks. Untyped on purpose; this is a probe, not a framework. */
   shared: Record<string, unknown>;
   signal: AbortSignal;
+  /**
+   * Drop a breadcrumb.
+   *
+   * `chain.contractRead` stalled four runs running and three rounds of
+   * reasoning about *why* produced three wrong answers. A check that times out
+   * should not have to be guessed at: every mark is timestamped and carried
+   * into the finding, including the timeout finding, so the last one recorded
+   * names the await that never returned.
+   */
+  mark(label: string): void;
 }
 
 export const ok = (detail: string, data?: Finding["data"]): Omit<Finding, "id" | "title" | "why" | "ms"> => ({

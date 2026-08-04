@@ -39,7 +39,7 @@ export async function runAll(opts: RunOptions = {}): Promise<Finding[]> {
 
   for (const [i, check] of CHECKS.entries()) {
     opts.onStart?.(check, i, CHECKS.length);
-    const finding = await runOne(check, { found, shared, signal: new AbortController().signal });
+    const finding = await runOne(check, { found, shared, signal: new AbortController().signal, mark: () => {} });
     found.set(finding.id, finding);
     findings.push(finding);
     opts.onProgress?.(finding, i, CHECKS.length);
@@ -83,14 +83,22 @@ async function runOne(check: Check, ctx: Ctx): Promise<Finding> {
   const budget = check.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const t0 = performance.now();
 
+  const trace: string[] = [];
+  const mark = (label: string) => trace.push(`+${Math.round(performance.now() - t0)}ms ${label}`);
+
   const timeout = new Promise<Finding>((resolve) => {
     setTimeout(() => {
       controller.abort();
       resolve({
         ...base,
         status: "fail",
-        detail: `Never settled within ${budget} ms. The call was made and no answer came back — that is a hang, not a slow network. Promise.race cannot cancel the losing promise, so it is still pending; the run continued without it.`,
+        detail:
+          `Never settled within ${budget} ms.` +
+          (trace.length
+            ? ` Last breadcrumb: ${trace[trace.length - 1]} — whatever follows it is what did not return.`
+            : " No breadcrumb was recorded, so it stalled before the first one, or the event loop is blocked and this timer only fired late."),
         diagnosis: "never-settled",
+        data: { trace, budgetMs: budget },
         ms: budget,
       });
     }, budget);
@@ -98,14 +106,22 @@ async function runOne(check: Check, ctx: Ctx): Promise<Finding> {
 
   const work = (async (): Promise<Finding> => {
     try {
-      const outcome = await check.run({ ...ctx, signal: controller.signal });
-      return { ...base, ...outcome, ms: Math.round(performance.now() - t0) };
+      const outcome = await check.run({ ...ctx, signal: controller.signal, mark });
+      return {
+        ...base,
+        ...outcome,
+        // Carried on success too: a check that passes in 9 s and one that
+        // passes in 90 ms are different facts about the platform.
+        data: trace.length ? { ...(outcome.data ?? {}), trace } : outcome.data,
+        ms: Math.round(performance.now() - t0),
+      };
     } catch (e) {
       return {
         ...base,
         status: "fail",
         detail: `Threw: ${e instanceof Error ? e.message : String(e)}`,
         diagnosis: "threw",
+        data: { trace },
         ms: Math.round(performance.now() - t0),
       };
     }

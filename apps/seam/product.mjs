@@ -27,6 +27,8 @@ export const DOT_NAME = `${PRODUCT_ID}.dot`;
 // a chain a devnet build does not carry, and createApp throws.
 export const CLOUD_ENV = "devnet";
 
+// 1.6.0 — breadcrumbs carried into timeout findings so a stall names the await
+// that never returned; the report downloads mid-run instead of only at the end.
 // 1.5.0 — the alias comparison no longer pits a hex string against raw bytes;
 // the control RPC is raw fetch with a real AbortController, not ethers.
 // 1.4.0 — asks for the Ring VRF alias on AccountsProvider.getProductAccountAlias,
@@ -38,7 +40,7 @@ export const CLOUD_ENV = "devnet";
 // 1.1.0 — sweeps the chains the host actually carries instead of assuming
 // truapi's two; stops gate 5 inheriting the host transport's failure; reports
 // getUserId as a privacy hazard rather than a capability.
-export const SUITE_VERSION = "1.5.0";
+export const SUITE_VERSION = "1.6.0";
 
 export const SOURCE_URL = "https://github.com/Baronvonbonbon/broadside";
 
