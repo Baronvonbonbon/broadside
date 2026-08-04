@@ -1,0 +1,380 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+pragma solidity ^0.8.24;
+
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./BroadsideUpgradable.sol";
+import "./interfaces/IBroadsideCampaignLifecycle.sol";
+import "./interfaces/IBroadsideCampaigns.sol";
+import "./interfaces/IBroadsideBudgetLedger.sol";
+import "./interfaces/IBroadsidePauseRegistry.sol";
+import "./interfaces/IBroadsideChallengeBonds.sol";
+
+/// @title BroadsideCampaignLifecycle
+/// @notice Handles campaign lifecycle transitions: complete, terminate, expire.
+///         Extracted from BroadsideCampaigns (alpha).
+///
+///         Reads campaign state from BroadsideCampaigns, routes refunds through
+///         BroadsideBudgetLedger, and calls back to Campaigns to update status.
+///
+///         Termination: 10% slash to governance, 90% refund to advertiser.
+///         Completion/Expiry: full remaining budget refund to advertiser.
+contract BroadsideCampaignLifecycle is IBroadsideCampaignLifecycle, ReentrancyGuard, BroadsideUpgradable {
+    /// v2: inactivityTimeoutBlocks demoted from immutable to storage, gated
+    /// by onlyOwnerOrPG with bounded setter + lock-once.
+    function version() public pure override returns (uint256) { return 2; }
+
+    // -------------------------------------------------------------------------
+    // References
+    // -------------------------------------------------------------------------
+
+    IBroadsideCampaigns public campaigns;
+    IBroadsideBudgetLedger public budgetLedger;
+    IBroadsidePauseRegistry public immutable pauseRegistry;
+    address public governanceContract;
+    address public settlementContract;
+    // FP-2: optional challenge bonds contract (address(0) = disabled)
+    IBroadsideChallengeBonds public challengeBonds;
+
+    /// @notice Phase A governance-tunable parameter. Read **live** on every
+    ///         `terminateInactive` call, so changes apply to ALL campaigns
+    ///         retroactively. Hard bounds prevent adversarial governance
+    ///         from instant-expiring active campaigns (MIN ≥ 1 day) or
+    ///         disabling inactivity expiry entirely (MAX ≤ 1 year).
+    /// @dev    Previously `immutable`; demoted in v2 for tunability.
+    uint256 public inactivityTimeoutBlocks;
+
+    /// @notice Lock-once flag. Once set under Phase-2 OpenGov, the
+    ///         inactivity timeout becomes effectively immutable again.
+    bool public inactivityTimeoutBlocksLocked;
+
+    /// @notice ParameterGovernance address authorised to retune the
+    ///         inactivity timeout through its bicameral veto-window flow.
+    ///         Lock-once on first set.
+    address public parameterGovernance;
+
+    /// @dev Hard bounds on `inactivityTimeoutBlocks`. Tighter on the
+    ///      low end than the Campaigns parameters because this value is
+    ///      read live: lowering it below the MIN could instant-expire
+    ///      active campaigns mid-flight.
+    uint256 internal constant INACTIVITY_TIMEOUT_MIN = 14_400;        // 1 day at 6s blocks
+    uint256 internal constant INACTIVITY_TIMEOUT_MAX = 5_256_000;     // ~1 year
+
+    /// @notice D1a cypherpunk plumbing lock. Lifecycle is a state-machine
+    ///         plumbing contract; all protocol-ref setters live under this one
+    ///         switch. Pre-lock: owner can swap refs to fix wiring mistakes.
+    ///         Post-lock: every setter on this contract reverts forever.
+    bool public plumbingLocked;
+    event PlumbingLocked();
+
+    modifier whenNotPaused() {
+        require(!pauseRegistry.pausedSettlement(), "P");
+        _;
+    }
+
+    event ContractReferenceChanged(string name, address oldAddr, address newAddr);
+
+    // -------------------------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------------------------
+
+    constructor(address _pauseRegistry, uint256 _inactivityTimeoutBlocks) {
+        require(_pauseRegistry != address(0), "E00");
+        require(_inactivityTimeoutBlocks > 0, "E00");
+        // Phase A: constructor accepts any non-zero initial value to
+        // preserve compatibility with unit-test deploys that use small
+        // values for `mineBlocks` convenience. The runtime setter
+        // enforces the production bounds; this lets tests start outside
+        // the live bounds without bricking on construction.
+        pauseRegistry = IBroadsidePauseRegistry(_pauseRegistry);
+        inactivityTimeoutBlocks = _inactivityTimeoutBlocks;
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase A — governance-tunable inactivity timeout
+    // -------------------------------------------------------------------------
+
+    event ParameterGovernanceSet(address indexed pg);
+    event InactivityTimeoutBlocksSet(uint256 oldValue, uint256 newValue);
+    event InactivityTimeoutBlocksLocked(uint256 finalValue);
+
+    /// @dev Owner OR ParameterGovernance — used for the inactivity-timeout
+    ///      setter so PG's bicameral veto-window flow can retune it
+    ///      without escalating to a full Council / Timelock vote.
+    modifier onlyOwnerOrPG() {
+        require(msg.sender == owner() || msg.sender == parameterGovernance, "E18");
+        _;
+    }
+
+    /// @notice Wire ParameterGovernance. Lock-once: the address cannot be
+    ///         rotated after the first set. Mirrors the pattern used in
+    ///         BroadsideClaimValidator + BroadsidePowEngine.
+    function setParameterGovernance(address pg) external onlyOwner {
+        require(pg != address(0), "E00");
+        require(!plumbingLocked, "locked");
+        parameterGovernance = pg;
+        emit ParameterGovernanceSet(pg);
+    }
+
+    /// @notice Retune the inactivity timeout. Read live on every
+    ///         `terminateInactive` call — change applies to every
+    ///         campaign immediately. Bounds are tighter than the
+    ///         Campaigns parameters because of the retroactive effect.
+    /// @dev    Bounded [INACTIVITY_TIMEOUT_MIN, INACTIVITY_TIMEOUT_MAX].
+    function setInactivityTimeoutBlocks(uint256 newTimeout) external onlyOwnerOrPG whenNotFrozen {
+        require(!inactivityTimeoutBlocksLocked, "locked");
+        require(
+            newTimeout >= INACTIVITY_TIMEOUT_MIN && newTimeout <= INACTIVITY_TIMEOUT_MAX,
+            "out-of-bounds"
+        );
+        uint256 old = inactivityTimeoutBlocks;
+        inactivityTimeoutBlocks = newTimeout;
+        emit InactivityTimeoutBlocksSet(old, newTimeout);
+    }
+
+    /// @notice Permanently freeze the inactivity timeout. Phase-2
+    ///         (OpenGov) gated. Refuses to lock out-of-bounds values
+    ///         so the cypherpunk end-state can't be ratified with a
+    ///         broken parameter.
+    function lockInactivityTimeoutBlocks() external whenOpenGovPhase {
+        require(!inactivityTimeoutBlocksLocked, "already locked");
+        require(
+            inactivityTimeoutBlocks >= INACTIVITY_TIMEOUT_MIN &&
+            inactivityTimeoutBlocks <= INACTIVITY_TIMEOUT_MAX,
+            "refuse-lock-out-of-bounds"
+        );
+        inactivityTimeoutBlocksLocked = true;
+        emit InactivityTimeoutBlocksLocked(inactivityTimeoutBlocks);
+    }
+
+    // -------------------------------------------------------------------------
+    // Admin
+    // -------------------------------------------------------------------------
+
+    /// @dev D1a plumbing-lock pattern: all five setters share `plumbingLocked`.
+    ///      Pre-lock: swap freely. Post-lock: setters revert forever.
+    function setCampaigns(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        emit ContractReferenceChanged("campaigns", address(campaigns), addr);
+        campaigns = IBroadsideCampaigns(addr);
+    }
+
+    function setBudgetLedger(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        emit ContractReferenceChanged("budgetLedger", address(budgetLedger), addr);
+        budgetLedger = IBroadsideBudgetLedger(addr);
+    }
+
+    function setGovernanceContract(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        emit ContractReferenceChanged("governance", governanceContract, addr);
+        governanceContract = addr;
+    }
+
+    function setSettlementContract(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        emit ContractReferenceChanged("settlement", settlementContract, addr);
+        settlementContract = addr;
+    }
+
+    /// @notice Set challenge bonds contract. address(0) leaves the feature off.
+    function setChallengeBonds(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        emit ContractReferenceChanged("challengeBonds", address(challengeBonds), addr);
+        challengeBonds = IBroadsideChallengeBonds(addr);
+    }
+
+    /// @notice D1a: commit every Lifecycle ref permanently.
+    function lockPlumbing() external onlyOwner whenOpenGovPhase {
+        require(!plumbingLocked, "already locked");
+        require(address(campaigns) != address(0), "campaigns unset");
+        require(address(budgetLedger) != address(0), "budgetLedger unset");
+        require(governanceContract != address(0), "governance unset");
+        require(settlementContract != address(0), "settlement unset");
+        // challengeBonds is optional — zero is a valid committed state.
+        plumbingLocked = true;
+        emit PlumbingLocked();
+    }
+
+    // -------------------------------------------------------------------------
+    // Lifecycle transitions
+    // -------------------------------------------------------------------------
+
+    /// @inheritdoc IBroadsideCampaignLifecycle
+    /// @dev Advertiser or settlement (auto-complete) can call.
+    ///      Drains remaining budget to advertiser via BudgetLedger.
+    function completeCampaign(uint256 campaignId) external nonReentrant whenNotPaused whenNotFrozen {
+        address advertiser = campaigns.getCampaignAdvertiser(campaignId);
+        require(advertiser != address(0), "E01");
+        require(
+            msg.sender == advertiser || msg.sender == settlementContract,
+            "E13"
+        );
+
+        IBroadsideCampaigns.CampaignStatus status = campaigns.getCampaignStatus(campaignId);
+        require(
+            status == IBroadsideCampaigns.CampaignStatus.Active ||
+            status == IBroadsideCampaigns.CampaignStatus.Paused,
+            "E14"
+        );
+
+        // Update status on Campaigns
+        campaigns.setCampaignStatus(campaignId, IBroadsideCampaigns.CampaignStatus.Completed);
+
+        // Drain remaining budget to advertiser
+        budgetLedger.drainToAdvertiser(campaignId, advertiser);
+
+        // FP-2: Return bond if set — fail-fast to protect advertiser's bond (AUDIT-003)
+        if (address(challengeBonds) != address(0)) {
+            challengeBonds.returnBond(campaignId);
+        }
+
+        emit CampaignCompleted(campaignId);
+    }
+
+    /// @inheritdoc IBroadsideCampaignLifecycle
+    /// @dev Called by GovernanceV2 directly (not via Campaigns).
+    ///      10% slash to governance, 90% refund to advertiser.
+    function terminateCampaign(uint256 campaignId) external nonReentrant whenNotFrozen {
+        require(!pauseRegistry.pausedSettlement(), "P");
+        require(msg.sender == governanceContract, "E19");
+
+        address advertiser = campaigns.getCampaignAdvertiser(campaignId);
+        require(advertiser != address(0), "E01");
+
+        IBroadsideCampaigns.CampaignStatus status = campaigns.getCampaignStatus(campaignId);
+        require(
+            status == IBroadsideCampaigns.CampaignStatus.Active  ||
+            status == IBroadsideCampaigns.CampaignStatus.Paused  ||
+            status == IBroadsideCampaigns.CampaignStatus.Pending, // demoted campaigns
+            "E14"
+        );
+
+        // Record termination block + update status on Campaigns
+        campaigns.setTerminationBlock(campaignId, block.number);
+        campaigns.setCampaignStatus(campaignId, IBroadsideCampaigns.CampaignStatus.Terminated);
+
+        // 10% slash to governance
+        budgetLedger.drainFraction(campaignId, governanceContract, 1000);
+
+        // 90% remaining refund to advertiser
+        budgetLedger.drainToAdvertiser(campaignId, advertiser);
+
+        emit CampaignTerminated(campaignId, block.number);
+    }
+
+    /// @inheritdoc IBroadsideCampaignLifecycle
+    /// @dev Fault-free admin/operator termination. Identical to terminateCampaign
+    ///      EXCEPT it does NOT slash — the full remaining budget refunds to the
+    ///      advertiser. The 10% slash is reserved for the adjudicated governance/
+    ///      challenge path; an operator killing a campaign for spam/safety must not
+    ///      be able to skim escrow (G-M1 hardening). Gated to the governance
+    ///      contract (router admin path, itself onlyOwner + onlyAdminPhase).
+    function adminTerminateCampaign(uint256 campaignId, uint16 reasonCode) external nonReentrant whenNotFrozen {
+        require(!pauseRegistry.pausedSettlement(), "P");
+        require(msg.sender == governanceContract, "E19");
+
+        address advertiser = campaigns.getCampaignAdvertiser(campaignId);
+        require(advertiser != address(0), "E01");
+
+        IBroadsideCampaigns.CampaignStatus status = campaigns.getCampaignStatus(campaignId);
+        require(
+            status == IBroadsideCampaigns.CampaignStatus.Active  ||
+            status == IBroadsideCampaigns.CampaignStatus.Paused  ||
+            status == IBroadsideCampaigns.CampaignStatus.Pending,
+            "E14"
+        );
+
+        campaigns.setTerminationBlock(campaignId, block.number);
+        campaigns.setCampaignStatus(campaignId, IBroadsideCampaigns.CampaignStatus.Terminated);
+
+        // FULL refund to advertiser — no slash.
+        budgetLedger.drainToAdvertiser(campaignId, advertiser);
+
+        emit CampaignAdminTerminated(campaignId, reasonCode, block.number);
+    }
+
+    /// @inheritdoc IBroadsideCampaignLifecycle
+    /// @dev Callable by anyone once pendingExpiryBlock has passed.
+    function expirePendingCampaign(uint256 campaignId) external nonReentrant whenNotPaused whenNotFrozen {
+        address advertiser = campaigns.getCampaignAdvertiser(campaignId);
+        require(advertiser != address(0), "E01");
+
+        IBroadsideCampaigns.CampaignStatus status = campaigns.getCampaignStatus(campaignId);
+        require(status == IBroadsideCampaigns.CampaignStatus.Pending, "E20");
+
+        uint256 expiryBlock = campaigns.getPendingExpiryBlock(campaignId);
+        require(block.number > expiryBlock, "E24");
+
+        // Update status on Campaigns
+        campaigns.setCampaignStatus(campaignId, IBroadsideCampaigns.CampaignStatus.Expired);
+
+        // Full refund to advertiser
+        budgetLedger.drainToAdvertiser(campaignId, advertiser);
+
+        // FP-2: Return bond if set — fail-fast to protect advertiser's bond (AUDIT-003)
+        if (address(challengeBonds) != address(0)) {
+            challengeBonds.returnBond(campaignId);
+        }
+
+        emit CampaignExpired(campaignId);
+    }
+
+    /// @inheritdoc IBroadsideCampaignLifecycle
+    /// @dev Called by GovernanceV2 when nay reaches 50% on an Active/Paused campaign.
+    ///      No budget is drained — the campaign returns to Pending for a second evaluation.
+    ///      pendingExpiryBlock is set to type(uint256).max to prevent expirePendingCampaign
+    ///      from racing the governance termination path.
+    function demoteCampaign(uint256 campaignId) external nonReentrant whenNotFrozen {
+        require(!pauseRegistry.pausedSettlement(), "P");
+        require(msg.sender == governanceContract, "E19");
+
+        IBroadsideCampaigns.CampaignStatus status = campaigns.getCampaignStatus(campaignId);
+        require(
+            status == IBroadsideCampaigns.CampaignStatus.Active ||
+            status == IBroadsideCampaigns.CampaignStatus.Paused,
+            "E14"
+        );
+
+        // Block expirePendingCampaign from firing — governance will terminate via evaluateCampaign
+        campaigns.setPendingExpiryBlock(campaignId, type(uint256).max);
+        campaigns.setCampaignStatus(campaignId, IBroadsideCampaigns.CampaignStatus.Pending);
+
+        emit CampaignDemoted(campaignId);
+    }
+
+    // -------------------------------------------------------------------------
+    // P20: Inactivity timeout
+    // -------------------------------------------------------------------------
+
+    /// @notice Expire an Active/Paused campaign that has had no settlement activity
+    ///         for `inactivityTimeoutBlocks`. Permissionless — anyone can call.
+    ///         Full remaining budget refunded to advertiser.
+    function expireInactiveCampaign(uint256 campaignId) external nonReentrant whenNotPaused whenNotFrozen {
+        address advertiser = campaigns.getCampaignAdvertiser(campaignId);
+        require(advertiser != address(0), "E01");
+
+        IBroadsideCampaigns.CampaignStatus status = campaigns.getCampaignStatus(campaignId);
+        require(
+            status == IBroadsideCampaigns.CampaignStatus.Active ||
+            status == IBroadsideCampaigns.CampaignStatus.Paused,
+            "E14"
+        );
+
+        uint256 lastBlock = budgetLedger.lastSettlementBlock(campaignId);
+        require(block.number > lastBlock + inactivityTimeoutBlocks, "E64");
+
+        campaigns.setCampaignStatus(campaignId, IBroadsideCampaigns.CampaignStatus.Completed);
+        budgetLedger.drainToAdvertiser(campaignId, advertiser);
+
+        // FP-2: Return bond if set — fail-fast to protect advertiser's bond (AUDIT-003)
+        if (address(challengeBonds) != address(0)) {
+            challengeBonds.returnBond(campaignId);
+        }
+
+        emit CampaignCompleted(campaignId);
+    }
+}

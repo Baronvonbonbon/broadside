@@ -435,36 +435,35 @@ Phase 0 measured **56 deployable** contracts (plus 7 abstract/library units). Th
 slots in `registry.ts` plus the router — the 9 dropped slots and the `Migration`/`Storage` carve-outs
 account for the difference.
 
-### Collapse — EIP-170 artifacts with no reason to exist under PolkaVM
+### ⚠️ The Settlement merge was measured and rejected
 
-`BroadsideSettlement` ← `DatumSettlement` + `DatumSettlementLogicA` + `DatumSettlementLogicB` +
-`DatumSettlementStorage`. The three-way DELEGATECALL split exists only to fit 24,576 bytes; `LogicA`
-is 98 lines of pure dispatch that disappears entirely on merge.
+The plan called for collapsing `Settlement` + `LogicA` + `LogicB` into one contract, reasoning that
+the three-way DELEGATECALL split exists only to satisfy EIP-170 and that PolkaVM's ceiling is 10.6×
+larger. **The merge was built, compiled, and does not fit.** The estimate was wrong by more than 2×:
 
-**Do not size this by summing the three measurements.** Each was compiled independently and each
-carries the full inherited base (`DatumSettlementStorage`, `DatumUpgradable`, `DatumOwnable`,
-`DatumPlumbingLockable`), so the sum — 243,797 B, 93% of the limit — triple-counts it and would
-wrongly suggest the merge is unsafe. Method that isolates the base: `DatumInterestCommitments` is 34
-lines and 3,833 B, so PolkaVM's *fixed* runtime overhead is ~4 KB; `LogicA` is 98 lines and 37,642 B,
-so its inherited base is **~34 KB**. Counting that base once:
+| | PVM bytes | % of 256 KiB |
+|---|---:|---:|
+| `Settlement` | 76,791 | 29.3% |
+| `LogicA` | 37,642 | 14.4% |
+| `LogicB` | 129,364 | 49.3% |
+| **sum of the three** | **243,797** | 93.0% |
+| **merged into one** | **363,578** | **138.7% — rejected** |
 
-```
-  base, once                      ~34 KB
-+ Settlement's own code      77 − 34 = ~43 KB
-+ LogicB's own code         129 − 34 = ~95 KB
-− dispatch plumbing removed            ~5 KB
-                                  ─────────
-                                  ~167 KB   ≈ 65% of 256 KiB
-```
+The merged contract is **larger than the sum of its parts**, by 119,781 bytes. That is the whole
+finding. `_processBatch` is a 640-line function with three call sites, and putting everything in one
+contract lets the optimiser inline it at each of them; the DELEGATECALL boundary was preventing that
+without anyone intending it to. `--optimize-runs 1` moves the EVM figure by 0.6% and the PVM figure
+not at all, so this is structural rather than a flag.
 
-**Error bar ±20 KB** (57–73%) — the base figure is inferred, not measured, and viaIR can inline
-either way across a merged contract. That straddles the 70% "comfortable" line, so this is a
-*measurement*, not an assumption: run `pnpm pvm:spike` the day the merge lands. **If it exceeds 70%,
-keep the split** — it already works.
+**So the split survives the port, and only its justification changes** — from EIP-170 to the blob
+limit. `tools/merge-settlement.mjs` remains in the tree as the record of a decision that measurement
+reversed; `tools/port-from-datum.mjs` no longer calls it.
 
-`DatumCampaignsMigrationLogic` is a second EIP-170 carve-out, but a clean-break deploy has nothing to
-migrate. **Do not port it in alpha.** It comes back with the first real contract upgrade, at which
-point it is a new decision with real numbers.
+The estimation method that produced ~167 KB assumed marginal code adds linearly once the shared base
+is counted once. It does, for code that is *called*. It does not for code the optimiser is free to
+duplicate, and nothing in a byte-count of separately-compiled contracts can reveal that. The lesson
+is narrow and worth keeping: **a size estimate across a refactor boundary is a guess, and the compiler
+is cheap to ask.**
 
 ### Splits that must survive
 
@@ -496,7 +495,7 @@ nowhere. The real minimum for a settling, paying deploy is **eight**:
 | # | Contract | ← DATUM source | PVM bytes | % |
 |---|---|---|---:|---:|
 | 1 | `BroadsideRouter` | `DatumGovernanceRouter` | 90,371 | 34.5% |
-| 2 | `BroadsideSettlement` | Settlement + LogicA + LogicB + Storage | ~167,000 est. | ~65% |
+| 2 | `BroadsideSettlement` + `LogicA` + `LogicB` | unchanged from DATUM — the merge was measured at 138.7% and rejected | 76,791 / 37,642 / 129,364 | 29.3 / 14.4 / 49.3% |
 | 3 | `BroadsideCampaigns` | `DatumCampaigns` | 202,662 | 77.3% |
 | 4 | `BroadsidePublishers` | `DatumPublishers` | 115,403 | 44.0% |
 | 5 | `BroadsideBudgetLedger` | `DatumBudgetLedger` | 108,771 | 41.5% |

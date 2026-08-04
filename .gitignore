@@ -27,3 +27,6 @@ tools/solc
 # Contract build output. The client-facing slice is generated into
 # apps/seam/src/generated/ and committed; the bytecode is not.
 contracts/out/
+
+# Renamed halves of the Settlement split. Inputs to the merge, not sources.
+contracts/.port-staging/

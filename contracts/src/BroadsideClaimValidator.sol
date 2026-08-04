@@ -1,0 +1,793 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+pragma solidity ^0.8.24;
+
+import "./BroadsidePlumbingLockable.sol";
+import "./interfaces/IBroadsideClaimValidator.sol";
+import "./interfaces/IBroadsideSettlement.sol";
+import "./interfaces/IBroadsideCampaigns.sol";
+import "./interfaces/IBroadsidePublishers.sol";
+import "./interfaces/IBroadsideZKVerifier.sol";
+import "./interfaces/IBroadsideClickRegistry.sol";
+import "./interfaces/IBroadsideStakeRoot.sol";
+import "./interfaces/IBroadsideInterestCommitments.sol";
+import "./interfaces/IBroadsideActivationBondsMinimal.sol";
+
+/// @dev #2-extension: minimal Settlement view for the per-user cumulative
+///      settled-events counter (history gate).
+interface ISettlementHistory {
+    function userTotalSettled(address user) external view returns (uint256);
+}
+
+/// @dev #5: minimal BroadsidePowEngine view (PoW difficulty target). Moved out
+///      of Settlement so the engine can be upgraded independently.
+interface IPowEngineGate {
+    function enforcePow() external view returns (bool);
+    function powTargetForUser(address user, uint256 eventCount) external view returns (uint256);
+}
+
+/// @dev #1 + #2-extension: minimal Campaigns view interface for per-campaign
+///      sybil knobs. Calls are try/catch-wrapped — falls back to no-op when
+///      Campaigns doesn't expose these yet (staged migration).
+/// @dev Inline read interface for the carved-out per-campaign allowlist
+///      module (alpha-4 EIP-170). Kept minimal -- ClaimValidator only
+///      needs the three per-claim reads.
+interface IAllowlistGate {
+    function campaignAllowedPublisherCount(uint256 campaignId) external view returns (uint16);
+    function isAllowedPublisher(uint256 campaignId, address publisher) external view returns (bool);
+    function getCampaignPublisherTakeRate(uint256 campaignId, address publisher) external view returns (uint16);
+}
+
+interface ICampaignsSybilKnobs {
+    function minUserSettledHistory(uint256 campaignId) external view returns (uint32);
+}
+
+/// @dev Path A: campaign-level ZK gate knobs (minStake, requiredCategory).
+///      try/catch-wrapped so Campaigns without these getters keep working.
+interface ICampaignsZkKnobs {
+    function getCampaignMinStake(uint256 campaignId) external view returns (uint256);
+    function getCampaignRequiredCategory(uint256 campaignId) external view returns (bytes32);
+    // M-4 audit fix: global cap on per-campaign minStake, clamped at proof
+    //   consumption time so a hostile campaign cannot strand users even if
+    //   the cap was raised after the campaign set its minStake.
+    function maxAllowedMinStake() external view returns (uint256);
+}
+
+/// @title BroadsideClaimValidator
+/// @notice Validates settlement claims — extracted from Settlement (SE-1).
+///
+///         Alpha-3 multi-pricing changes:
+///           - Claim struct: impressionCount→eventCount, clearingCpmWei→rateWei,
+///             plus actionType and clickSessionHash fields.
+///           - Hash preimage is now 9 fields (was 7): adds actionType + clickSessionHash.
+///           - Rate check calls getCampaignPot(campaignId, actionType) instead of
+///             reading bidCpmWei from getCampaignForSettlement.
+///           - Type-1 (click): checks clickRegistry.hasUnclaimed for session validity.
+///           - Type-2 (remote-action): ecrecover checks actionSig against pot.actionVerifier.
+///           - getCampaignForSettlement now returns a 3-tuple (no bidCpmWei).
+contract BroadsideClaimValidator is IBroadsideClaimValidator, BroadsidePlumbingLockable {
+    function version() public pure override returns (uint256) { return 1; }
+
+    // BM-2: Matches Settlement.MAX_USER_EVENTS — prevents overflow in payment calc
+    /// @notice Baked absolute ceiling on `maxClaimEvents`. Governance cannot
+    ///         raise the per-claim event count above this — protects against
+    ///         a captured owner/PG allowing a single claim to assert a year's
+    ///         worth of fake impressions in one mining job.
+    /// @dev    10× the default tunable value. Mining cost at base difficulty
+    ///         (shift=8) for a 1M-event claim is ~256M attempts ≈ minutes in
+    ///         browser JS — still mineable, but the bucket dynamics carry the
+    ///         actual rate limit.
+    uint256 public constant ABSOLUTE_MAX_CLAIM_EVENTS = 1_000_000;
+
+    /// @notice Governance-tunable per-claim event-count ceiling. Default
+    ///         matches the historical baked constant (100,000). Set via
+    ///         `setMaxClaimEvents`, bounded above by ABSOLUTE_MAX_CLAIM_EVENTS.
+    uint256 public maxClaimEvents = 100_000;
+    event MaxClaimEventsSet(uint256 oldValue, uint256 newValue);
+
+    /// @notice Address of the parallel governance hook authorized to call
+    ///         param setters alongside the owner. Lock-once; intended to
+    ///         be set to `BroadsideParameterGovernance`.
+    /// @dev    Avoids a full ownership transfer to PG (ClaimValidator has
+    ///         many other owner-only setters that need to stay with the
+    ///         deployer / timelock for emergency response).
+    address public parameterGovernance;
+    event ParameterGovernanceSet(address indexed pg);
+
+    function setParameterGovernance(address pg) external onlyOwner whenPlumbingUnlocked {
+        require(pg != address(0), "E00");
+        parameterGovernance = pg;
+        emit ParameterGovernanceSet(pg);
+    }
+
+    /// @dev Owner OR parameterGovernance — used by setters that should be
+    ///      conviction-vote tunable in addition to the emergency-owner path.
+    modifier onlyOwnerOrPG() {
+        require(msg.sender == owner() || msg.sender == parameterGovernance, "E18");
+        _;
+    }
+
+    /// @notice Tune the per-claim event-count ceiling. Bounded [1, ABSOLUTE_MAX].
+    /// @dev    Callable by owner OR `parameterGovernance` (via PG.execute()).
+    function setMaxClaimEvents(uint256 newMax) external onlyOwnerOrPG {
+        require(newMax > 0 && newMax <= ABSOLUTE_MAX_CLAIM_EVENTS, "E11");
+        uint256 old = maxClaimEvents;
+        maxClaimEvents = newMax;
+        emit MaxClaimEventsSet(old, newMax);
+    }
+
+    IBroadsideCampaigns public campaigns;
+    IBroadsidePublishers public publishers;
+    /// @notice F-020 fix (2026-05-20): demoted from `immutable` so the
+    ///         upgrade ladder can swap the PauseRegistry without
+    ///         redeploying ClaimValidator. Lock-once via the existing
+    ///         `plumbingLocked` umbrella (see setPauseRegistry below).
+    address public pauseRegistry;
+    event PauseRegistrySet(address indexed registry);
+    IBroadsideZKVerifier public zkVerifier;
+    // FP-CPC: ClickRegistry for type-1 session validation (address(0) = disabled)
+    IBroadsideClickRegistry public clickRegistry;
+    // #2: optional Settlement ref for cumulative history-total reads.
+    //     address(0) = history gate disabled (default before wiring).
+    address public settlement;
+
+    // #5: optional PowEngine ref for per-impression PoW difficulty target.
+    //     address(0) = PoW gate disabled (default before wiring).
+    address public powEngine;
+    event PowEngineSet(address indexed engine);
+
+    /// @notice Carved-out allowlist module (alpha-4 EIP-170). When wired,
+    ///         ClaimValidator reads ALLOWLIST-mode gates here instead of from
+    ///         BroadsideCampaigns. address(0) means "treat every campaign as OPEN"
+    ///         which preserves legacy behavior for test fixtures.
+    address public campaignAllowlist;
+    event CampaignAllowlistSet(address indexed allowlist);
+
+    // Path A (ZK): stake-root + interest-commitment refs. Both optional —
+    //              when unset, Check 9 falls back to the legacy 3-pub verify()
+    //              entrypoint and the stake/interest gates are effectively off.
+    IBroadsideStakeRoot public stakeRoot;
+    IBroadsideInterestCommitments public interestCommitments;
+
+    /// @notice Optimistic-activation mute gateway. When wired, claims for
+    ///         a muted campaign are rejected at the validation layer. Same
+    ///         contract that holds the activation bond — see
+    ///         BroadsideActivationBonds.mute(). address(0) = mute gate disabled.
+    IBroadsideActivationBondsMinimal public activationBonds;
+    event ActivationBondsSet(address addr);
+    function setActivationBonds(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        activationBonds = IBroadsideActivationBondsMinimal(addr);
+        emit ActivationBondsSet(addr);
+    }
+
+    /// @notice M-8 audit fix: minimum age (in blocks) for an interest
+    ///         commitment before a ZK proof using it will verify. Defeats
+    ///         reactive last-second swaps to satisfy a campaign's
+    ///         requiredCategory. Default 100 blocks (~10 min @ 6s/block).
+    ///         0 = disabled. Governance-tunable; subject to plumbingLocked.
+    uint256 public minInterestAgeBlocks = 100;
+    event MinInterestAgeBlocksSet(uint256 blocks_);
+
+    function setMinInterestAgeBlocks(uint256 blocks_) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        minInterestAgeBlocks = blocks_;
+        emit MinInterestAgeBlocksSet(blocks_);
+    }
+
+    /// @notice D1a cypherpunk plumbing lock. ClaimValidator is a pure-validation
+    ///         plumbing contract; all protocol-ref setters live under this one
+    ///         switch. Pre-lock: owner can swap refs to fix wiring mistakes.
+    ///         Post-lock: every setter on this contract reverts forever.
+    ///         Deploy scripts should call `lockPlumbing()` once all wiring is
+    ///         verified and the protocol is ready to commit.
+    ///         (plumbingLocked + PlumbingLocked now provided by BroadsidePlumbingLockable.)
+
+    constructor(address _campaigns, address _publishers, address _pauseRegistry) {
+        require(_campaigns != address(0), "E00");
+        require(_publishers != address(0), "E00");
+        require(_pauseRegistry != address(0), "E00");
+        campaigns = IBroadsideCampaigns(_campaigns);
+        publishers = IBroadsidePublishers(_publishers);
+        pauseRegistry = _pauseRegistry;
+    }
+
+    // -------------------------------------------------------------------------
+    // Admin (all setters gated by plumbingLocked)
+    // -------------------------------------------------------------------------
+
+    function setCampaigns(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        campaigns = IBroadsideCampaigns(addr);
+    }
+
+    /// @notice F-020 fix: rotatable PauseRegistry. Lock-once via the same
+    ///         `plumbingLocked` switch that covers the rest of this
+    ///         contract's protocol refs.
+    function setPauseRegistry(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        pauseRegistry = addr;
+        emit PauseRegistrySet(addr);
+    }
+
+    function setPublishers(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        publishers = IBroadsidePublishers(addr);
+    }
+
+    /// @notice Wire the verifying key for the optional claim-bound ZK predicate
+    ///         (see _verifyClaimPredicate). LEFT UNWIRED in the current deploy:
+    ///         while zkVerifier == address(0), every campaign is treated as
+    ///         non-ZK regardless of its requiresZkProof flag, so the predicate
+    ///         slot is dormant. Wire this (with the matching circuit's VK) only
+    ///         when a concrete predicate is greenlit. There is no
+    ///         set-back-to-zero unwire path, so wiring is a deliberate step.
+    function setZKVerifier(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        zkVerifier = IBroadsideZKVerifier(addr);
+    }
+
+    function setClickRegistry(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        clickRegistry = IBroadsideClickRegistry(addr);
+    }
+
+    function setSettlement(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        settlement = addr;
+    }
+
+    function setPowEngine(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        powEngine = addr;
+        emit PowEngineSet(addr);
+    }
+
+    function setCampaignAllowlist(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        campaignAllowlist = addr;
+        emit CampaignAllowlistSet(addr);
+    }
+
+    /// @notice Path A: wire the stake-root commitment contract.
+    function setStakeRoot(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        stakeRoot = IBroadsideStakeRoot(addr);
+    }
+
+    /// @notice Optional secondary stake-root contract. Used for migration
+    ///         from a V1 reporter-set oracle to a V2 bonded-reporter oracle:
+    ///         during the transition, validateClaim accepts a recent root
+    ///         from EITHER `stakeRoot` OR `stakeRoot2`. Address(0) leaves
+    ///         the secondary off (default; behaves like single-source V1).
+    IBroadsideStakeRoot public stakeRoot2;
+    event StakeRoot2Set(address indexed addr);
+    function setStakeRoot2(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        // address(0) is permitted here (disabling the secondary). Setter is
+        // re-callable until plumbingLocked so operators can swap V2 versions
+        // during a multi-stage migration.
+        stakeRoot2 = IBroadsideStakeRoot(addr);
+        emit StakeRoot2Set(addr);
+    }
+
+    /// @notice Path A: wire the per-user interest-commitment contract.
+    function setInterestCommitments(address addr) external onlyOwner {
+        require(!plumbingLocked, "locked");
+        require(addr != address(0), "E00");
+        interestCommitments = IBroadsideInterestCommitments(addr);
+    }
+
+    /// @notice Commit every protocol-ref on this contract permanently.
+    /// @dev    Requires every ref to be set non-zero first — protects against
+    ///         locking with a critical ref still unwired. Optional refs that
+    ///         remain zero are *committed to staying zero* by the lock.
+    function lockPlumbing() external override onlyOwner whenOpenGovPhase {
+        require(address(campaigns) != address(0), "campaigns unset");
+        require(address(publishers) != address(0), "publishers unset");
+        // zkVerifier, clickRegistry, settlement are optional — zero is a valid
+        // post-lock state (feature off forever) so we don't require them.
+        _lockPlumbing();
+    }
+
+    // -------------------------------------------------------------------------
+    // Validation
+    // -------------------------------------------------------------------------
+
+    /// @inheritdoc IBroadsideClaimValidator
+    /// @dev HOIST (#1): every read in this function is invariant across a
+    ///      batch that shares one campaignId, one publisher, and one
+    ///      actionType. The settle hot path calls it once per batch and
+    ///      threads the result into validateClaimWithContext per claim, so
+    ///      these ~8 staticcalls run once instead of once per claim.
+    function resolveBatchContext(
+        uint256 campaignId,
+        address publisher,
+        uint8 actionType,
+        address user
+    ) public view override returns (IBroadsideClaimValidator.BatchContext memory ctx) {
+        // Check 0: valid action type
+        if (actionType > 2) { ctx.reasonCode = 21; return ctx; } // E88 mapped to reason 21
+
+        // Check 2: campaign exists and is active; get the legacy single-publisher
+        // hint + the open-mode default take rate.
+        (uint8 status, address cPublisher, uint16 cTakeRate)
+            = campaigns.getCampaignForSettlement(campaignId);
+
+        if (status != 1) { ctx.reasonCode = 4; return ctx; }
+
+        // Phase 2b: bond-backed runtime mute. When ActivationBonds is wired,
+        // a muted Active campaign rejects all claims for the duration of the
+        // mute. Reason 22 = "campaign muted by bond". try/catch keeps a
+        // stale or misconfigured reference from bricking settlement.
+        if (address(activationBonds) != address(0)) {
+            // F-019 fix (2026-05-20): fail-CLOSED on revert. The mute
+            // gate is the cheap challenge primitive for optimistic
+            // activation; ActivationBonds reverting on isMuted leaves
+            // the mute state undefined, and paying on undefined state
+            // neuters the muter's DoS authority for any campaign whose
+            // ActivationBonds module is briefly unhealthy. Reject the
+            // claim rather than fall through.
+            try activationBonds.isMuted(campaignId) returns (bool muted) {
+                if (muted) { ctx.reasonCode = 22; return ctx; }
+            } catch {
+                ctx.reasonCode = 22; return ctx;
+            }
+        }
+
+        // Check 3: publisher match — tri-state, unified through the allowlist.
+        //   If the campaign has any allowed publishers, ALLOWLIST mode applies
+        //   (covers both legacy single-publisher and new multi-publisher).
+        //   Otherwise it's OPEN mode and the existing tag-match path runs.
+        if (publisher == address(0)) { ctx.reasonCode = 5; return ctx; }
+
+        uint16 allowedCount = 0;
+        IAllowlistGate _al = IAllowlistGate(campaignAllowlist);
+        if (campaignAllowlist != address(0)) {
+            try _al.campaignAllowedPublisherCount(campaignId) returns (uint16 n) {
+                allowedCount = n;
+            } catch {
+                // Module reachable but reverted -- treat as legacy OPEN.
+            }
+        }
+
+        if (allowedCount > 0) {
+            // ALLOWLIST mode: per-publisher gate + per-publisher take rate snapshot.
+            try _al.isAllowedPublisher(campaignId, publisher) returns (bool allowed) {
+                if (!allowed) { ctx.reasonCode = 5; return ctx; }
+            } catch {
+                ctx.reasonCode = 5; return ctx;
+            }
+            try _al.getCampaignPublisherTakeRate(campaignId, publisher)
+                returns (uint16 r)
+            {
+                cTakeRate = r;
+            } catch {
+                // Per-publisher rate must be readable in allowlist mode.
+                ctx.reasonCode = 5; return ctx;
+            }
+            // Advertiser allowlist snapshot still applies (publisher-side opt-in).
+            try campaigns.campaignAllowlistEnabled(campaignId) returns (bool alEnabled) {
+                if (alEnabled) {
+                    address advertiser = campaigns.getCampaignAdvertiser(campaignId);
+                    try campaigns.campaignAllowlistSnapshot(campaignId, advertiser) returns (bool ok) {
+                        if (!ok) { ctx.reasonCode = 15; return ctx; }
+                    } catch {
+                        ctx.reasonCode = 15; return ctx;
+                    }
+                }
+            } catch {}
+        } else if (cPublisher != address(0)) {
+            // Legacy fast path for old Campaigns deployments that don't expose
+            // the allowlist getters: use the single-publisher hint directly.
+            if (publisher != cPublisher) { ctx.reasonCode = 5; return ctx; }
+            try campaigns.campaignAllowlistEnabled(campaignId) returns (bool alEnabled) {
+                if (alEnabled) {
+                    address advertiser = campaigns.getCampaignAdvertiser(campaignId);
+                    try campaigns.campaignAllowlistSnapshot(campaignId, advertiser) returns (bool ok) {
+                        if (!ok) { ctx.reasonCode = 15; return ctx; }
+                    } catch {
+                        ctx.reasonCode = 15; return ctx;
+                    }
+                }
+            } catch {}
+        } else {
+            // OPEN mode: tag-matched. Publishers with their own allowlist
+            // enabled cannot serve open campaigns (BM-7).
+            try publishers.allowlistEnabled(publisher) returns (bool alEnabled) {
+                if (alEnabled) { ctx.reasonCode = 15; return ctx; }
+            } catch {}
+        }
+
+        // Check 4: S12 blocklist.
+        // A4-fix (2026-05-12): fail-OPEN on revert. Mirrors Settlement: the
+        //   blocklist is a policy layer, not a critical safety invariant, and
+        //   silently DoS'ing every settlement on a single misconfigured ref
+        //   is more harmful than letting a single batch through.
+        try publishers.isBlocked(publisher) returns (bool blocked) {
+            if (blocked) { ctx.reasonCode = 11; return ctx; }
+        } catch {
+            // Liveness: continue validation rather than rejecting.
+        }
+
+        // Check 5: rate check — fetch pot config for this action type
+        uint256 potRate;
+        address potActionVerifier;
+        try campaigns.getCampaignPot(campaignId, actionType) returns (IBroadsideCampaigns.ActionPotConfig memory pot) {
+            potRate = pot.rateWei;
+            potActionVerifier = pot.actionVerifier;
+        } catch {
+            ctx.reasonCode = 3; return ctx; // pot not found
+        }
+        if (potRate == 0) { ctx.reasonCode = 3; return ctx; }
+
+        // Check 8c: #2-extension — proof-of-on-chain-history filter. The
+        //   campaign can require the reporter has settled N events historically
+        //   (across any campaign) before participating. Soft sybil bar that
+        //   doesn't lock out real users with prior protocol activity.
+        //   (campaign + user invariant — runs once per batch.)
+        if (settlement != address(0)) {
+            try ICampaignsSybilKnobs(address(campaigns)).minUserSettledHistory(campaignId) returns (uint32 minHist) {
+                if (minHist > 0) {
+                    try ISettlementHistory(settlement).userTotalSettled(user) returns (uint256 totalSettled) {
+                        if (totalSettled < uint256(minHist)) { ctx.reasonCode = 28; return ctx; }
+                    } catch {
+                        ctx.reasonCode = 28; return ctx;
+                    }
+                }
+            } catch {}
+        }
+
+        // ZK-required flag (view claims only). Read once here; the proof
+        // itself is verified per-claim in validateClaimWithContext.
+        bool requiresZk = false;
+        if (actionType == 0 && address(zkVerifier) != address(0)) {
+            try campaigns.getCampaignRequiresZkProof(campaignId) returns (bool reqZk) {
+                requiresZk = reqZk;
+            } catch {
+                // M-4: fail closed — if we can't determine whether a ZK proof is required,
+                // refuse the batch rather than silently treating it as not-required.
+                ctx.reasonCode = 16; return ctx;
+            }
+        }
+
+        // PoW-enforced flag (#5). enforcePow() is batch-invariant; the
+        // per-user/per-eventCount target read stays per-claim.
+        bool enforcePow = false;
+        if (powEngine != address(0)) {
+            // F-018 fix (2026-05-20): fail-CLOSED on enforcePow revert.
+            try IPowEngineGate(powEngine).enforcePow() returns (bool enf) {
+                enforcePow = enf;
+            } catch {
+                ctx.reasonCode = 27; return ctx;
+            }
+        }
+
+        ctx.ok = true;
+        ctx.takeRate = cTakeRate;
+        ctx.potRate = potRate;
+        ctx.potActionVerifier = potActionVerifier;
+        ctx.requiresZk = requiresZk;
+        ctx.enforcePow = enforcePow;
+    }
+
+    /// @inheritdoc IBroadsideClaimValidator
+    /// @dev Per-claim checks only. All campaign/publisher reads are resolved
+    ///      in `ctx`; this function performs no campaign/publisher staticcalls
+    ///      except the per-claim ones whose inputs vary (PoW target by
+    ///      eventCount, ZK proof, click session).
+    function validateClaimWithContext(
+        IBroadsideSettlement.Claim calldata claim,
+        address user,
+        uint256 campaignId,
+        uint256 assignedNonce,
+        bytes32 prevHash,
+        IBroadsideClaimValidator.BatchContext memory ctx
+    ) public view override returns (bool, uint8, bytes32) {
+        // Check 1: non-zero events within allowed range
+        if (claim.eventCount == 0) return (false, 2, bytes32(0));
+        if (claim.eventCount > maxClaimEvents) return (false, 17, bytes32(0));
+
+        // Check 5: rate ceiling (pot rate resolved in ctx)
+        if (claim.rateWei > ctx.potRate) return (false, 6, bytes32(0));
+
+        // SLIM (#2b): path-specific proof material lives in the optional `proof`
+        // sidecar. Plain view claims carry none. At most one entry is allowed.
+        if (claim.proof.length > 1) return (false, 21, bytes32(0));
+        bool hasProof = claim.proof.length == 1;
+        bytes32 clickSessionHash = hasProof ? claim.proof[0].clickSessionHash : bytes32(0);
+        bytes32 stakeRootUsed    = hasProof ? claim.proof[0].stakeRootUsed    : bytes32(0);
+
+        // SLIM (#2): no nonce / prevHash / claimHash equality checks. The
+        // contract assigns the nonce (assignedNonce = lastNonce+1) and reads
+        // prevHash from storage, then recomputes the canonical claim hash from
+        // those derived values below. Nothing supplied by the caller is
+        // trusted for chain position; replay is bound by the signed-batch
+        // firstNonce anchored to lastNonce+1 in the relay / dual-sig paths.
+
+        // Check 8: claim hash (9-field preimage: campaignId, publisher, user,
+        // eventCount, rateWei, actionType, clickSessionHash, nonce, prevHash).
+        // L-2: Uses abi.encode (32-byte aligned) rather than abi.encodePacked so the
+        // schema is unambiguous if fields are added later. Off-chain mirrors must use
+        // ethers AbiCoder.defaultAbiCoder().encode(...) — not solidityPacked.
+        bytes32 computedHash = keccak256(abi.encode(
+            campaignId,
+            claim.publisher,
+            user,
+            claim.eventCount,
+            claim.rateWei,
+            claim.actionType,
+            clickSessionHash,
+            assignedNonce,
+            prevHash,
+            stakeRootUsed
+        ));
+
+        // Check 8b: #5 — Per-impression PoW with scaling difficulty. ctx.enforcePow
+        //   resolved once per batch; the per-user/per-eventCount target read
+        //   stays here because it varies by claim.
+        if (ctx.enforcePow) {
+            bytes32 powNonce = hasProof ? claim.proof[0].powNonce : bytes32(0);
+            // F-018: fail-CLOSED on powTargetForUser revert.
+            try IPowEngineGate(powEngine).powTargetForUser(user, claim.eventCount) returns (uint256 target) {
+                if (uint256(keccak256(abi.encodePacked(computedHash, powNonce))) > target) {
+                    return (false, 27, bytes32(0));
+                }
+            } catch {
+                return (false, 27, bytes32(0));
+            }
+        }
+
+        // Check 9: optional claim-bound ZK predicate (view claims only, if the
+        //          campaign requires it). ctx.requiresZk already implies
+        //          actionType==0 && zkVerifier wired. The predicate is a GENERAL
+        //          slot — public inputs are [claimHash, nullifier, eventCount]
+        //          (mandatory claim-binding prefix) + a predicate-defined suffix
+        //          (see _verifyClaimPredicate). The reference circuit is the
+        //          stake + interest-category match; it is DORMANT by default
+        //          (zkVerifier unwired) for the current deploy.
+        //          Wallets/relays must build proofs at proof-generation time and
+        //          may need to retry with a fresh proof on reason 16 (e.g. a
+        //          root rotates between gen and verify).
+        if (claim.actionType == 0 && ctx.requiresZk) {
+            if (!hasProof) return (false, 16, bytes32(0));
+            bool proofPresent = false;
+            for (uint256 i = 0; i < 8; i++) { if (claim.proof[0].zkProof[i] != bytes32(0)) { proofPresent = true; break; } }
+            if (!proofPresent) return (false, 16, bytes32(0));
+            if (!_verifyClaimPredicate(claim, claim.proof[0], user, campaignId, computedHash)) return (false, 16, bytes32(0));
+        }
+
+        // Check 10 (type-1 only): verify click session exists and is unclaimed
+        if (claim.actionType == 1) {
+            if (address(clickRegistry) == address(0)) return (false, 22, bytes32(0)); // E90 → reason 22
+            if (clickSessionHash == bytes32(0)) return (false, 22, bytes32(0));
+            try clickRegistry.hasUnclaimed(user, campaignId, clickSessionHash) returns (bool unclaimed) {
+                if (!unclaimed) return (false, 22, bytes32(0));
+            } catch {
+                return (false, 22, bytes32(0));
+            }
+        }
+
+        // Check 11 (type-2 only): verify actionSig from the pot's actionVerifier EOA
+        if (claim.actionType == 2) {
+            if (ctx.potActionVerifier == address(0)) return (false, 23, bytes32(0)); // E94 → reason 23
+            if (!hasProof) return (false, 23, bytes32(0));
+            // bytes32[3]: [r, s, v-as-bytes32]; all-zero = no sig provided
+            // sig is over computedHash (the full claim hash)
+            bytes32 ethHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", computedHash));
+            (bytes32 r, bytes32 s, uint8 v) = _splitSig(claim.proof[0].actionSig);
+            if (v != 27 && v != 28) return (false, 23, bytes32(0));
+            if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) return (false, 23, bytes32(0));
+            address recovered = ecrecover(ethHash, v, r, s);
+            if (recovered == address(0) || recovered != ctx.potActionVerifier) return (false, 23, bytes32(0));
+        }
+
+        return (true, 0, computedHash);
+    }
+
+    /// @inheritdoc IBroadsideClaimValidator
+    /// @dev Tier-3 fan-out reduction: one cross-contract call validates the whole
+    ///      chain instead of one per claim. Reuses validateClaimWithContext verbatim
+    ///      (no logic divergence); only the sequential nonce/prevHash threading +
+    ///      abort-on-first-failure live here, matching LogicB's gapFound semantics.
+    function validateBatch(
+        IBroadsideSettlement.Claim[] calldata claims,
+        address user,
+        uint256 campaignId,
+        uint256 startNonce,
+        bytes32 startPrevHash,
+        IBroadsideClaimValidator.BatchContext memory ctx
+    ) external view override returns (bool[] memory oks, uint8[] memory reasons, bytes32[] memory computedHashes) {
+        uint256 n = claims.length;
+        oks = new bool[](n);
+        reasons = new uint8[](n);
+        computedHashes = new bytes32[](n);
+        bytes32 prevHash = startPrevHash;
+        bool gap = false;
+        for (uint256 i = 0; i < n; i++) {
+            if (gap) {
+                // An earlier claim failed; the chain head didn't advance, so the
+                // rest are rejected regardless (reason 1) — don't bother validating.
+                reasons[i] = 1;
+                continue;
+            }
+            // Before the first failure every prior claim validated OK, so the chain
+            // advanced i times ⇒ this claim's nonce is startNonce + i.
+            (bool ok, uint8 r, bytes32 h) =
+                validateClaimWithContext(claims[i], user, campaignId, startNonce + i, prevHash, ctx);
+            oks[i] = ok;
+            reasons[i] = r;
+            computedHashes[i] = h;
+            if (ok) { prevHash = h; } else { gap = true; }
+        }
+    }
+
+    /// @inheritdoc IBroadsideClaimValidator
+    /// @dev Back-compat monolithic entry: resolveBatchContext +
+    ///      validateClaimWithContext composed for a single claim. Behaviour is
+    ///      identical to the pre-hoist validateClaim for direct callers/tests.
+    function validateClaim(
+        IBroadsideSettlement.Claim calldata claim,
+        address user,
+        uint256 campaignId,
+        uint256 assignedNonce,
+        bytes32 prevHash
+    ) external view override returns (bool, uint8, uint16, bytes32) {
+        IBroadsideClaimValidator.BatchContext memory ctx =
+            resolveBatchContext(campaignId, claim.publisher, claim.actionType, user);
+        if (!ctx.ok) return (false, ctx.reasonCode, 0, bytes32(0));
+        (bool valid, uint8 reasonCode, bytes32 computedHash) =
+            validateClaimWithContext(claim, user, campaignId, assignedNonce, prevHash, ctx);
+        if (!valid) return (false, reasonCode, 0, bytes32(0));
+        return (true, 0, ctx.takeRate, computedHash);
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal
+    // -------------------------------------------------------------------------
+
+    function _splitSig(bytes32[3] calldata sig) internal pure returns (bytes32 r, bytes32 s, uint8 v) {
+        r = sig[0];
+        s = sig[1];
+        v = uint8(uint256(sig[2]));
+    }
+
+    /// @dev Verify the optional claim-bound ZK predicate. GENERALIZED slot: the
+    ///      proof's public inputs are split into a FIXED, mandatory claim-binding
+    ///      prefix and a predicate-defined suffix.
+    ///
+    ///        pub[0] = claimHash   -- binds the proof to THIS exact claim
+    ///                                (campaignId, publisher, user, amounts,
+    ///                                 nonce...), so a proof can't be replayed
+    ///                                onto a different claim.
+    ///        pub[1] = nullifier   -- replay / sybil: Poseidon(userSecret,
+    ///                                campaignId, windowId). Also consumed by
+    ///                                LogicB's NullifierRegistry.
+    ///        pub[2] = eventCount  -- the claimed event count.
+    ///        pub[3..6]            -- PREDICATE-DEFINED. Produced by the wired
+    ///                                predicate adapter below; whatever the
+    ///                                campaign's circuit needs.
+    ///
+    ///      This is a general "prove a claim-bound predicate about the claimer"
+    ///      slot -- the circuit can attest to anything expressible over the
+    ///      claimer's secret (interest/tag profile, proof-of-personhood,
+    ///      age/jurisdiction eligibility, private-allowlist membership, ...)
+    ///      WITHOUT revealing it. To swap the predicate, swap the suffix adapter
+    ///      (`_referencePredicateSuffix`) + the verifying key on BroadsideZKVerifier;
+    ///      the [claimHash, nullifier, eventCount] prefix is the fixed contract.
+    ///      See docs/ZK-PREDICATE-DESIGN.md for the deferred circuit-registry plan.
+    ///
+    ///      DORMANT BY DEFAULT: `zkVerifier == address(0)` (unwired) makes every
+    ///      campaign non-ZK regardless of its requiresZkProof flag (see
+    ///      resolveBatchContext), so this path never runs until a verifying key
+    ///      is deliberately wired. The current deploy leaves it unwired.
+    function _verifyClaimPredicate(
+        IBroadsideSettlement.Claim calldata claim,
+        IBroadsideSettlement.ClaimProof calldata p,
+        address user,
+        uint256 campaignId,
+        bytes32 computedHash
+    )
+        internal view returns (bool)
+    {
+        (bool ok, uint256[4] memory suffix) = _referencePredicateSuffix(user, campaignId, p);
+        if (!ok) return false;
+
+        uint256[7] memory pubs = [
+            uint256(computedHash), // pub[0] claimHash   ── mandatory claim-binding prefix
+            uint256(p.nullifier),  // pub[1] nullifier
+            claim.eventCount,      // pub[2] eventCount
+            suffix[0],             // pub[3..6] ─────────── predicate-defined suffix
+            suffix[1],
+            suffix[2],
+            suffix[3]
+        ];
+        try zkVerifier.verifyA(abi.encodePacked(p.zkProof), pubs) returns (bool valid) {
+            return valid;
+        } catch {
+            return false;
+        }
+    }
+
+    /// @dev Reference predicate adapter: the original "stake gate + interest-
+    ///      category match" circuit. Returns the predicate-defined public-input
+    ///      suffix [stakeRoot, minStake, interestRoot, requiredCategory] plus an
+    ///      `ok` flag that short-circuits the predicate when a pre-condition
+    ///      fails (stale stake root / too-fresh interest commitment).
+    ///
+    ///      A DIFFERENT predicate (personhood, eligibility, allowlist, ...) would
+    ///      replace THIS function + the verifying key. The interest/stake reads
+    ///      are intentionally isolated here so `_verifyClaimPredicate` above stays
+    ///      circuit-agnostic.
+    function _referencePredicateSuffix(address user, uint256 campaignId, IBroadsideSettlement.ClaimProof calldata p)
+        internal view returns (bool ok, uint256[4] memory suffix)
+    {
+        // pub[3]: stake root — wallet/relay submits which root the proof was
+        //         generated against (proof.stakeRootUsed). Validator checks it's
+        //         within the configured lookback window. If stakeRoot contract
+        //         isn't wired, fall back to bytes32(0) — circuit expects 0 when
+        //         no stake gate is enforced.
+        bytes32 sRoot = p.stakeRootUsed;
+        if (sRoot != bytes32(0)) {
+            // require recency only when a non-zero root is asserted; otherwise
+            // the campaign's minStake==0 path treats this as "no gate"
+            bool recent = false;
+            if (address(stakeRoot) != address(0) && stakeRoot.isRecent(sRoot)) {
+                recent = true;
+            } else if (address(stakeRoot2) != address(0) && stakeRoot2.isRecent(sRoot)) {
+                recent = true;
+            }
+            if (!recent) return (false, suffix);
+        }
+
+        // pub[4]: min stake — campaign-set threshold (0 = no stake floor).
+        //   M-4 audit fix: clamp by the governance-set maxAllowedMinStake at
+        //   consumption time (not just at write time). Defends users from a
+        //   campaign whose minStake was set before the cap was tightened.
+        uint256 minStake = 0;
+        try ICampaignsZkKnobs(address(campaigns)).getCampaignMinStake(campaignId) returns (uint256 v) {
+            minStake = v;
+        } catch {}
+        if (minStake > 0) {
+            try ICampaignsZkKnobs(address(campaigns)).maxAllowedMinStake() returns (uint256 cap) {
+                if (cap > 0 && minStake > cap) minStake = cap;
+            } catch {}
+        }
+
+        // pub[5]: user's interest commitment.
+        //   M-8 audit fix: enforce minimum commitment age. A commitment set
+        //   within `minInterestAgeBlocks` of the proof's submission cannot be
+        //   used — defeats reactive swaps to satisfy a campaign's required
+        //   category right before settling.
+        bytes32 iRoot = bytes32(0);
+        if (address(interestCommitments) != address(0)) {
+            iRoot = interestCommitments.interestRoot(user);
+            if (iRoot != bytes32(0) && minInterestAgeBlocks > 0) {
+                uint256 setAt = interestCommitments.lastSetBlock(user);
+                // setAt is the block at which the current iRoot was written;
+                // require it to be at least minInterestAgeBlocks in the past.
+                if (block.number < setAt + minInterestAgeBlocks) return (false, suffix);
+            }
+        }
+
+        // pub[6]: required category (0 = any).
+        bytes32 reqCat = bytes32(0);
+        try ICampaignsZkKnobs(address(campaigns)).getCampaignRequiredCategory(campaignId) returns (bytes32 c) {
+            reqCat = c;
+        } catch {}
+
+        suffix[0] = uint256(sRoot);
+        suffix[1] = minStake;
+        suffix[2] = uint256(iRoot);
+        suffix[3] = uint256(reqCat);
+        return (true, suffix);
+    }
+}
