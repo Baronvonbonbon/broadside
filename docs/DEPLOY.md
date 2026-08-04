@@ -61,6 +61,52 @@ version of the rule; ask.
 empty signer could still take a name that cost `sonde` 11 PAS. Budgeting for a registration against
 the signer's own balance would have been wrong.
 
+### 2026-08-04 — the alpha spine
+
+18 contracts, all **native PolkaVM**, on Paseo Asset Hub (chain 420420417). Deployed by
+`contracts/scripts/deploy-spine.mjs`, wired in 12 steps, and 15 router slots registered and read
+back. **40.77 PAS** all in.
+
+| Contract | Address | PVM bytes |
+|---|---|---:|
+| `BroadsideCampaigns` | `0x613F4cB8948fd92669AC0136D9f8d7c1Baa303D4` | 202,662 |
+| `BroadsideSettlementLogicB` | `0xE3E130f9796Ea0AD40e057D4Ee83f03C196a22e8` | 129,364 |
+| `BroadsidePublishers` | `0x6967dd9df51239259E8666B02717421c2C1BD066` | 115,403 |
+| `BroadsideBudgetLedger` | `0x630Fe920314B0B5D2F951B27E1ea791B09Cd35cD` | 108,771 |
+| `BroadsidePaymentVault` | `0xE1ACb29f0508330207B7995eF282E0cF700e727D` | 106,503 |
+| `BroadsideClaimValidator` | `0x5a62a5C3291DA6FfAd3226Ee36A4A405e3fae6DD` | 93,512 |
+| `BroadsideRouter` | `0x4712c1BB0394Ec22f3a79e0e5c6d4Ba494edBd57` | 90,371 |
+| `BroadsidePauseRegistry` | `0xb6735AE0bfC263d3fB278d5eC8dDD15FC81393D5` | 87,261 |
+| `BroadsideDualSig` | `0x8aBEF3253ca3bb2ff6A8bC9ae25ed4df8D264CF8` | 85,681 |
+| `BroadsideCampaignLifecycle` | `0xC7E70EB2F6F37426F0DE27d240858a4fa7516ABc` | 80,667 |
+| `BroadsideSettlement` | `0x1b838C593bBe84883EAb6EdFF9d8F1D05FD5242a` | 76,791 |
+| `BroadsidePublisherStake` | `0x5AAEB9db0eeF5dcc3b8d067A14256168F54124b8` | 76,364 |
+| `BroadsidePublisherReputation` | `0x611283C853c0c4E02623655f00C5A3F19bc458EE` | 40,263 |
+| `BroadsidePowEngine` | `0x5d50B0455859C7065f97310BCA7d039B3999F860` | 39,469 |
+| `BroadsideSettlementLogicA` | `0x30D2F55ab373BfAD45de7441fFBc6e8B9b09f1dC` | 37,642 |
+| `BroadsideSettlementRateLimiter` | `0x5eA7DBd1177c5EAf828cAdDc1A1839bE1d04B1A8` | 36,385 |
+| `BroadsideClickRegistry` | `0x47b7a377a6E0E200112C5ca930A85F85617bEE13` | 33,442 |
+| `BroadsideNullifierRegistry` | `0x96d9C344D21F2b104B75d3041F6F72080bE9D617` | 28,183 |
+
+**Guardians** for the 2-of-3 pause registry are `0x26194fE2…`, `0x8D21a4e6…`, `0x52fD96Ee…` — the
+deployer plus DATUM's Bob and Charlie. The contract rejects duplicates with `E11`, correctly: a 2-of-3
+whose three members are one key is a 1-of-1 wearing a costume.
+
+**`relay` is the deployer** in `Settlement.configure`. That is the account permitted to submit on a
+viewer's behalf, and in alpha the off-chain relay has not been stood up yet. It cannot be zero, and
+naming the deployer is more honest than a placeholder that looks like a decision.
+
+**Two things the deploy script now does that it did not at first**, both learned by spending a
+transaction to find out. It reads constructor arity from the **ABI** rather than a regex over the
+source — which is what missed `BroadsideRouter`'s three arguments and `BroadsideCampaigns`' four. And
+it records every address before the next deploy begins, so a run that dies halfway is re-run rather
+than restarted; that property was used twice.
+
+**Not yet done: the `cdm` registration.** Broadside publishes exactly ONE name — `@broadside/hub`,
+pointing at `BroadsideRouter` — because the cdm registry is append-only and an entry "cannot be
+deleted, renamed or reassigned". Everything else resolves through the router's own re-pointable map.
+That step is deliberate and separate, and has not been taken.
+
 ## Publishing
 
 ```bash
