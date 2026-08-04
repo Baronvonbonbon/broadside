@@ -144,6 +144,41 @@ result returns as a notification rather than a reply. **PAPI does this; a hand-r
 cannot.** `packages/client`'s host backend is therefore `app.chain.connect(…)` plus
 `@parity/product-sdk-contracts`, not a bespoke transport.
 
+## What Parity already provides — audit before building
+
+The seam probe hand-rolled several things the platform ships. That was cheap in a throwaway probe and
+would be expensive in `packages/client` and `packages/identity`, so the mapping is recorded here
+before Phase 3 starts rather than discovered during it.
+
+| Hand-rolled in the probe | Parity package | Verdict |
+|---|---|---|
+| `src/memory.ts` — host store with a `window.localStorage` fallback | **`@parity/product-sdk-local-storage`** · `createLocalKvStore` — *"automatic host/browser backend detection"* | **Direct reimplementation**, fallback and all. Replace in Phase 3. |
+| `src/chain.ts` `HostRpc` — id-correlated JSON-RPC over `getHostProvider` | **`@parity/product-sdk-chain-client`** · `createChainClient` | Superseded. It also cannot drive `chainHead_v1_call`'s subscription lifecycle, which PAPI does. |
+| `src/seam.ts` — ABI encode/decode via ethers `Interface` | **`@parity/product-sdk-contracts`** · `createContract().m.query()` | Already adopted in `chain.readMatrix`. Keep ethers only for the external control path. |
+| `contracts/scripts/native-read.mjs` — SCALE compact/u128/H160 codecs | **`@parity/truapi/scale`** (a thin wrapper over `scale-ts`: `compact`, `u128`, `Bytes`, `Vec`, `Struct`, `Enum`) | Duplication, though the hand-rolled decoder is correct — verified against a 15,932-byte blob. Swap when the script stops being a one-off. |
+| H160/SS58 handling scattered across scripts | **`@parity/product-sdk-address`** | Adopt. |
+| hex/bytes helpers | **`@parity/product-sdk-utils`** | Adopt. |
+
+**Not duplication, and worth stating so it does not get "fixed" later:** `src/burner.ts`.
+`@parity/product-sdk-keys` exposes `deriveProductAccountPublicKey`, but that is *canonical sr25519
+product-account* derivation — mirrored byte-for-byte by polkadot-desktop and polkadot-app-android-v2.
+It cannot produce an `ecrecover`-able key, which is the entire reason the burner exists. The
+`deriveEntropy` → keccak → secp256k1 path stays ours.
+
+That package is still worth knowing: it means `getProductAccount` derivation is **reproducible
+off-device**, which the relay and indexer will need in order to compute a viewer's payout address
+without asking the device for it. (One caveat carried in its own docs: Android derives differently
+for productIds that are even-length all-hex strings. `broadside.dot` contains a `.`, so it never trips
+that branch — but a future product id must not be hex-shaped.)
+
+**Not yet used, and Phase 3 will need them:** `@parity/product-sdk-tx` (submission and lifecycle
+watching), `@parity/product-sdk-signer` (Host API signer manager), `@parity/product-sdk-crypto`
+(symmetric encryption and key derivation — the sealing FARE does by hand in `msg.ts`).
+
+The probe itself is **not** being refactored onto these now. It is one run from closing Phase 1, and
+its storage layer is what the cross-session baselines for gates 1 and 2 depend on; swapping that out
+to save lines would risk the only two gates already proven.
+
 ## Repo shape
 
 Workspace globs are declared in `pnpm-workspace.yaml`.
