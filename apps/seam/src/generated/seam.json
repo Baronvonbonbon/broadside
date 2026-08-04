@@ -3,10 +3,10 @@
   "contract": "BroadsideSeam",
   "solc": "Version: 0.8.24+commit.e11b9ed9.Linux.g++",
   "resolc": "Solidity frontend for the revive compiler version 1.4.0+commit.ca3c770.llvm-22.1.5",
-  "target": null,
-  "address": "",
-  "chainId": null,
-  "rpc": "",
+  "target": "pvm",
+  "address": "0xbcb6C034923130b66E7596E778d6D56c283a77B7",
+  "chainId": 420420417,
+  "rpc": "https://eth-rpc-testnet.polkadot.io/",
   "eip712": {
     "_comment": "EIP-712 definition for BroadsideSeam. The build embeds this in the artifact so the app reads it from the same place it reads the ABI, and contracts/test/seam.test.mjs asserts it against the typehash literals in BroadsideSeam.sol. There is deliberately no second copy to drift from.",
     "domain": {

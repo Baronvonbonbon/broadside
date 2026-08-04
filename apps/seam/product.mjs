@@ -13,7 +13,13 @@
 // is eligible for, which cost sonde 33 PAS in three accidental names. Check
 // with sonde/tools/whoowns.sh before pointing `pad` at anything.
 
-export const PRODUCT_ID = "broadsideseam";
+// `broadside`, not `broadsideseam`: the probe is a throwaway but the name is
+// permanent, and the contenthash behind it is not — so the flagship label gets
+// registered once and re-pointed at the real product later. It also means the
+// baseline this probe records sits under the same product identity the widget
+// will use, which is what makes its answers transferable rather than a
+// measurement of some other product's behaviour.
+export const PRODUCT_ID = "broadside";
 export const DOT_NAME = `${PRODUCT_ID}.dot`;
 
 // Must equal the --env passed to `pad`. The SDK defaults cloud storage to
@@ -40,15 +46,19 @@ export const KEY_DOMAIN = "broadside/v1/seam/claim-key";
 // perfectly deterministic.
 export const ENTROPY_LABEL_ALT = "broadside/v1/seam/control";
 
-// Where a state-changing write goes, if anyone runs one.
-//
-// Empty until BroadsideSeam is deployed — `contracts/deployed-addresses.json`
-// is the source, copied here at build time rather than imported, because this
-// bundle is published standalone and cannot reach the repo.
-export const SEAM_ADDRESS = "";
+// The deployed BroadsideSeam. Kept here as documentation; the value the app
+// actually uses comes from `src/generated/seam.json`, which is generated from
+// `contracts/deployed-addresses.json` and checked for staleness before publish.
+export const SEAM_ADDRESS = "0xbcb6C034923130b66E7596E778d6D56c283a77B7";
 
 // An Ethereum-RPC endpoint for the control path. The host transport is the
 // thing under test; this is what it gets compared against, and a difference
 // between them is the finding. Empty disables the control path rather than
 // silently testing nothing.
-export const ETH_RPC_URL = "";
+//
+// Note this endpoint serves chain id 420420417 — the Paseo Asset Hub that DATUM
+// and FARE deploy to. `@parity/truapi` names a *different* chain, Paseo Next v2
+// Hub. Whether the host can reach this one is exactly what `chain.hostTransport`
+// is for; if it cannot, this control path is the fallback, and the report will
+// show one working while the other does not.
+export const ETH_RPC_URL = "https://eth-rpc-testnet.polkadot.io/";

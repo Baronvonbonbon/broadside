@@ -1,0 +1,13 @@
+{
+  "BroadsideSeam": {
+    "address": "0xbcb6C034923130b66E7596E778d6D56c283a77B7",
+    "target": "pvm",
+    "chainId": 420420417,
+    "rpc": "https://eth-rpc-testnet.polkadot.io/",
+    "bytes": 15932,
+    "solc": "Version: 0.8.24+commit.e11b9ed9.Linux.g++",
+    "resolc": "Solidity frontend for the revive compiler version 1.4.0+commit.ca3c770.llvm-22.1.5",
+    "deployedAt": "2026-08-04T12:06:52.690Z",
+    "tx": "0xfb91ce63292e76beff85ec9c225f323c96d12f0db1b6906867f4b0f5c4d796f6"
+  }
+}

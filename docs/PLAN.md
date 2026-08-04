@@ -147,8 +147,11 @@ until republished.
 - [x] toolchain: `tools/fetch-toolchain.sh` (pinned + checksum-verified solc and resolc),
       `contracts/scripts/build.mjs` (both targets), `contracts/scripts/deploy.mjs`
 - [x] drift guards: `sync-abi.mjs --check`, `check-identity.mjs`, 9 contract tests
-- [ ] `BroadsideSeam` deployed — needs `DEPLOYER_KEY` and a funded account
-- [ ] `docs/phase1-seam-report.md` — the answers, produced by a device run
+- [x] `BroadsideSeam` deployed — `0xbcb6C034923130b66E7596E778d6D56c283a77B7`, chain 420420417,
+      native PolkaVM (15,932 bytes), verified by `contracts/scripts/verify-seam.mjs --write`
+- [x] [`phase1-seam-report.md`](phase1-seam-report.md) part 1 — the chain side
+- [ ] `broadside.dot` registered — blocked on `pad login`, which needs a phone
+- [ ] part 2 of the report — the host side, from a device run
 
 **Gate** — all five must be true:
 - [ ] `deriveEntropy` is deterministic *in a published bundle*, not just in dev
@@ -157,7 +160,7 @@ until republished.
 - [ ] `getProductAccount` returns distinct keys per index
 - [ ] The host provider reaches the chain and returns correct read data
 - [ ] A burner-signed EIP-712 payload is accepted by a PolkaVM contract's `ecrecover`, end to end,
-      from inside the app
+      from inside the app — **contract half proven**, host half open
 
 Gates 1 and 2 need **two runs** with a full app restart between them: within one session a cached
 value and a stable one are indistinguishable, so the first run records a baseline in the host's
@@ -168,7 +171,13 @@ rather than guessing.
 
 ### Findings so far
 
-Two came out of building it, before any device run:
+**A PolkaVM contract accepts an off-chain EIP-712 signature, and the gasless relay pattern works.**
+An account with zero balance signed a `Seam`; a different account submitted `attest` and paid; the
+contract recovered the signer, credited the *signer*, and recorded the submitter separately — block
+11807942, 13,430 gas. That is the economic shape of the whole settlement path, working, on native
+PolkaVM. Details in [`phase1-seam-report.md`](phase1-seam-report.md).
+
+Two more came out of building it, and both are still open:
 
 **`getHostProvider` returns polkadot-api's `JsonRpcProvider`, not ethers'.** It is a Substrate
 transport over `truApi.chain.*`, so `eth_call` is not obviously something it can do. The probe asks
