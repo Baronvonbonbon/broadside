@@ -105,6 +105,36 @@ a global rate limit would key on. Using it buys Sybil resistance across publishe
 privacy claim to buy it. The tier boundary is therefore not a UI preference — it is the boundary
 where that one call becomes permissible.
 
+## Chain access: eth-rpc is a shim, not a requirement
+
+pallet-revive's native interface is the **`ReviveApi` runtime API** — `ReviveApi_call` for reads,
+`revive.call` as an extrinsic for writes. `eth-rpc` is a translation proxy in front of it so that
+ethers, hardhat and MetaMask work unchanged. Nothing about PolkaVM requires it.
+
+FARE ran this spike against Paseo on 2026-08-01
+(`fare/docs/SUBSTRATE-NATIVE-SPIKE.md`) and found reads **round-trip exactly** — single words and a
+16-field struct both decoded correctly — writes dispatch from a substrate origin, and **no contract
+changes are needed**. It is a client transport swap. `pine-rpc` already implements the translation,
+and reaches runtime calls via `chainHead_v1_call` — one of the three methods suite 1.2.0 probes for.
+
+Inside the Polkadot App this stops being a preference. The host transport **blocks `eth_*`**
+outright, so eth-rpc is not something we can choose there; the native path is the only host-routed
+option that exists.
+
+Three constraints come with it, and the one that would normally be fatal is not, for a reason already
+designed in:
+
+| Constraint | What it means for Broadside |
+|---|---|
+| A substrate origin gets a **different H160**, derived from the AccountId32 rather than recovered from a signature | Only matters where `msg.sender` is the identity. Settlement does not care who submits. `publishers`/`advertiserStake` and the rest of the registry family do — so the cutover is per role, and belongs to Phase 5, not the viewer path. |
+| **There is no anonymous read.** An unmapped account cannot perform even a view call — `revive.AccountUnmapped` — and `revive.mapAccount` takes a deposit | Would be severe for a normal dApp. It is not for us: **the viewer is never an origin.** They sign an EIP-712 claim and never author a transaction. One well-known mapped read account serves every view call (a dry-run's origin is not published), and the relay is the only writer. |
+| **EIP-712 keys do not move.** An sr25519 account cannot produce an `ecrecover`-able signature | This is the architecture already. The migration is *transport and payer identity only*; the viewer's derived secp256k1 burner is untouched. |
+
+So the direction is native, and the open question is narrow: **is a runtime-call method on the host's
+allowlist?** If yes, `packages/client` gets a PAPI backend and Broadside keeps the host's
+censorship-resistance. If no, it uses an external endpoint or `pine-rpc` and gives that up — a real
+loss, but not a blocking one.
+
 ## Repo shape
 
 Workspace globs are declared in `pnpm-workspace.yaml`.
@@ -252,7 +282,10 @@ the upgrade ladder impossible. One name only.
 ## Phase 3 — Core widget and the settlement services ⬜
 
 **Produces**
-- [ ] `packages/identity`, `packages/client`, `packages/widget`
+- [ ] `packages/identity`, `packages/widget`
+- [ ] `packages/client` — **two backends behind one interface**: PAPI/`ReviveApi_call` (host-routed,
+      preferred) and ethers/eth-rpc (external, the fallback that works today). FARE's spike says the
+      swap is mechanical and needs no contract change; see "Chain access" above
 - [ ] `services/relay`, `services/cosigner` — ported from `datum-labs` (`relay/src/claims.mjs`,
       `relay/src/bulletin.mjs`, `advertiser-cosigner/`) with `registry.mjs`'s four copies deleted in
       favour of `@broadside/protocol`
