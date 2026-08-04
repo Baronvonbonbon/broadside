@@ -33,7 +33,7 @@ PolkaVM's **256 KiB** blob limit — a 10.6× larger ceiling, with only `DatumGo
 in the Polkadot App, where Products are sandboxed WebView bundles published to a `.dot` label — and
 where an extension cannot exist at all. Meanwhile the host offers exactly the primitives the
 extension was hand-rolling: deterministic entropy derivation, per-index product accounts, and a Ring
-VRF anonymous alias.
+VRF alias — all three since confirmed on a device.
 
 Three repos also carry the same code at different vintages. `registry.mjs` exists as four
 byte-identical copies across `datum-labs` services (all md5 `0c8b1462…`); the creative-format table
@@ -61,15 +61,16 @@ they are the second and third surfaces, not the first.
 | Token plane | Ships in alpha, in full |
 | Personhood | Optional viewer tier — priced, not mandated |
 | Repo | `Baronvonbonbon/broadside`, public, GPL-3.0-or-later |
-| Viewer identity | A per-product burner derived from host entropy. The platform's own alias does not exist, and its `getUserId` is a *global* handle — see the correction below. |
+| Viewer identity | A per-product burner derived from host entropy, plus the host's Ring VRF alias as the pseudonym — both measured stable across a restart. But `getUserId` is a *global* handle any Product can read, so unlinkability is still contingent. See below. |
 
 ## The identity architecture
 
 This is the part that decides whether the product is possible, so it is stated before the phases.
 
-> **Corrected 2026-08-04 by the Phase 1 device run.** This section previously claimed the platform
-> provides cross-product unlinkability. It does not. See
-> [`phase1-seam-report.md`](phase1-seam-report.md) gate 2.
+> **Corrected twice by the Phase 1 device runs.** This section first claimed the platform provides
+> cross-product unlinkability — it does not, because `getUserId` is global. It then claimed the Ring
+> VRF alias does not exist — it does, on `AccountsProvider`, and the null came from a deprecated call.
+> See [`phase1-seam-report.md`](phase1-seam-report.md) gate 2.
 
 **Broadside never sees the viewer's connected account.** Two host primitives do the work, and the
 third one the plan expected does not exist:
@@ -86,7 +87,9 @@ third one the plan expected does not exist:
    suffix:{tag:"Left",value:0}}, {chainId:<Paseo Asset Hub>, junctions:[]})` returns a
    `ContextualAlias`, stable across calls within a session. The deprecated
    `app.wallet.getAnonymousAlias()` returns `null`, which is what made three runs conclude the
-   primitive was absent. Cross-session stability is the one thing still outstanding.
+   primitive was absent. **Stable across a full app restart** — so the viewer pseudonym is a platform
+   primitive, not a Broadside convention. `createRingVRFProof` sits on the same interface and binds a
+   message to that context, which is the shape a verified-tier attestation needs.
 
 **The unlinkability is ours, not the platform's.** `getUserId()` returns a stable, human-readable,
 *global* username (`primaryUsername`), readable by any Product and identical across all of them. So a
