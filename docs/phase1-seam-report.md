@@ -1,5 +1,54 @@
 # Phase 1 — seam report
 
+## Result: all six gates pass
+
+Suite 2.0.0, Pixel 10 Pro XL / Android 16 / Chrome 150 WebView, 2026-08-04.
+
+| | Gate | Evidence |
+|---|---|---|
+| ✓ | `deriveEntropy` is deterministic in a published bundle | burner `0xC9dbB624…` identical across a full app close and reopen |
+| ✓ | The Ring VRF alias is stable per product | `0xffe0a57e…` stable across calls *and* across a restart |
+| ✓ | `getProductAccount` yields distinct keys per index | 4 indices, 4 distinct keys |
+| ✓ | A Product can read the deployed contract from inside the app | 3 of 4 paths, best 7 ms |
+| ✓ | …through the host's own provider, no external endpoint | `getRawClient` + `createContractFromClient` |
+| ✓ | A burner-signed EIP-712 payload survives on-chain `ecrecover` | recovered `0xC9dbB624…`, **via the host-routed path** |
+
+**The headline.** A key derived from host entropy inside the Polkadot App produced an EIP-712
+signature that a native PolkaVM contract recovered correctly — reached through the host's own
+transport, with no external RPC, no user tap, and no funds on the signing key. That is the assumption
+every later phase rests on, and it holds.
+
+### The read matrix
+
+| path | result |
+|---|---|
+| A · `app.chain.connect` + `createContractRuntime` | **timed out at 20 s** |
+| B · `app.chain.getRawClient` + `createContractFromClient` | ✓ 339 ms |
+| C · `connect()` then `getRawClient` | ✓ **7 ms** |
+| D · external eth-rpc (control) | ✓ 349 ms |
+
+A failing while B and C succeed is **exactly what the SDK's own documentation predicts**.
+`createContractRuntime` is described there as *"fine for mocks but susceptible to `Incompatible
+runtime entry` errors on a live chain whose descriptor lags. Prefer `createContractRuntimeFromClient`
+for production use."* B and C are that preferred route: they run the dry-run through
+`client.getUnsafeApi()`, bypassing PAPI's compat-token check while preserving argument and return
+shapes. Having tried both side by side, the recommendation is not stylistic — A does not work here.
+
+C at 7 ms against B's 339 ms is connection reuse: `connect()` establishes the chain client and
+`getRawClient` then returns the cached one. **Phase 3 should connect once at startup and hold it**,
+which turns a per-impression read from a third of a second into single-digit milliseconds — the
+difference between a widget that can price an auction inline and one that cannot.
+
+### What this settles for Phase 3
+
+`packages/client`'s host backend is `app.chain.connect({assetHub: devnet_asset_hub})` at boot, then
+`getRawClient` + `createContractFromClient` per contract. Not a bespoke transport, not `pine-rpc`, and
+not an external endpoint. The external path stays as a fallback and as the control that makes a host
+failure attributable.
+
+---
+
+
 **Contract:** `0xbcb6C034923130b66E7596E778d6D56c283a77B7` (native PolkaVM, 15,932 bytes) on chain
 420420417 · **Product:** `broadside.dot` · **Device:** Pixel 10 Pro XL, Android 16, Chrome 150 WebView
 

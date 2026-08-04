@@ -6,8 +6,8 @@
 | Phase | | Status |
 |---|---|---|
 | 0 | PolkaVM size survey | ✅ done — [`phase0-pvm-size-report.md`](phase0-pvm-size-report.md) |
-| 1 | The seam probe | 🟡 5 of 6 gates pass — one run from done |
-| 2 | Contracts: the alpha spine on PolkaVM | ⬜ not started |
+| 1 | The seam probe | ✅ done — all six gates pass. [`phase1-seam-report.md`](phase1-seam-report.md) |
+| 2 | Contracts: the alpha spine on PolkaVM | ⬜ next |
 | 3 | Core widget and settlement services | ⬜ not started |
 | 4 | First Product publisher | ⬜ not started |
 | 5 | Full contract set, token plane, governance | ⬜ not started |
@@ -72,8 +72,8 @@ This is the part that decides whether the product is possible, so it is stated b
 > VRF alias does not exist — it does, on `AccountsProvider`, and the null came from a deprecated call.
 > See [`phase1-seam-report.md`](phase1-seam-report.md) gate 2.
 
-**Broadside never sees the viewer's connected account.** Two host primitives do the work, and the
-third one the plan expected does not exist:
+**Broadside never sees the viewer's connected account.** Three host primitives do the work, and all
+three are now measured on a device rather than assumed:
 
 1. **The signing key is an app-local secp256k1 burner** derived via `deriveEntropy()` under a
    Broadside domain separator. This is not an optimization — it is forced. The host signs sr25519 and
@@ -136,13 +136,26 @@ designed in:
 | ~~**There is no anonymous read.**~~ FARE measured `revive.AccountUnmapped` from an AccountId32 origin | **Does not apply to us — measured.** An *Ethereum-derived* origin (20 H160 bytes + twelve `0xEE`) reads without any mapping; `native-read.mjs` calls `chainId()` from the zero address successfully. Broadside's viewer identity is an H160 burner, so there is no deposit, no onboarding step, and no well-known read account. The viewer is never a transaction author either way. |
 | **EIP-712 keys do not move.** An sr25519 account cannot produce an `ecrecover`-able signature | This is the architecture already. The migration is *transport and payer identity only*; the viewer's derived secp256k1 burner is untouched. |
 
-**The device run settled it: the host-routed path exists.** `chainHead_v1_call` is allowed — the host
+**Settled on a device: the host-routed path works.** `chainHead_v1_call` is allowed — the host
 exposes the new JSON-RPC spec and blocks the legacy `state_*` / `system_*` / `author_*` surface
-entirely. So Broadside can keep the host's censorship-resistance, on one condition: the client must
-drive the chainHead subscription lifecycle, where a call carries a `followSubscription` and its
-result returns as a notification rather than a reply. **PAPI does this; a hand-rolled JSON-RPC client
-cannot.** `packages/client`'s host backend is therefore `app.chain.connect(…)` plus
-`@parity/product-sdk-contracts`, not a bespoke transport.
+entirely — and a contract read completed through it in **7 ms warm**. Broadside keeps the host's
+censorship-resistance.
+
+`packages/client`'s host backend is settled by measurement, not preference:
+
+```ts
+await app.chain.connect({ assetHub: devnet_asset_hub });          // once, at boot
+const raw = app.chain.getRawClient(devnet_asset_hub);
+const contract = createContractFromClient(raw, devnet_asset_hub, address, abi);
+const { value } = await contract.someView.query();               // ~7 ms warm
+```
+
+Two things the read matrix established that a single-path test could not. `createContractRuntime`
+over the typed API from `connect()` **times out** against this chain, exactly as the SDK's own docs
+warn (*"susceptible to `Incompatible runtime entry` errors on a live chain whose descriptor lags"*) —
+so the `getRawClient` route is required, not merely preferred. And holding the connection is worth
+50×: 339 ms cold against 7 ms warm, which is the difference between a widget that can price an
+auction inline and one that cannot.
 
 ## What Parity already provides — audit before building
 
@@ -217,7 +230,7 @@ drift is exactly what this repo exists to end.
 
 ---
 
-## Phase 1 — The seam probe 🟡
+## Phase 1 — The seam probe ✅
 
 **The riskiest assumption, tested first.** Everything downstream assumes a Product inside the
 Polkadot App WebView can derive a burner, sign EIP-712 with it, and reach a PolkaVM contract through
@@ -239,23 +252,16 @@ until republished.
 - [x] [`phase1-seam-report.md`](phase1-seam-report.md) part 1 — the chain side
 - [x] `broadside.dot` registered and published — <https://broadside.dev-dot.li>, CID
       `bafybeifqyvii2d…`, owned by `0xff54a5a1…`. See [`DEPLOY.md`](DEPLOY.md)
-- [x] part 2 of the report — the host side, measured across nine device runs
-- [ ] one clean run on suite 1.9.0 to close the last three gates
+- [x] part 2 of the report — the host side, measured across ten device runs
+- [x] all six gates pass on suite 2.0.0
 
-**Gate** — measured on a Pixel 10 Pro XL, suite 1.0.0 → 1.9.0:
-- [x] **`deriveEntropy` is deterministic in a published bundle** — burner `0xC9dbB624…` identical
-      across a full app close and reopen, from identical entropy
-- [x] **The Ring VRF alias is stable per product** — `0xffe0a57e…` via
-      `getProductAccountAlias({productId:"broadside.dot", suffix:Left(0)}, {chainId:<Paseo Asset
-      Hub>, junctions:[]})`, stable within a session *and* across a restart. The deprecated
-      `app.wallet.getAnonymousAlias()` returns null, which is what made three runs conclude wrongly
-- [x] **`getProductAccount` yields distinct keys per index** — 4 indices, 4 distinct keys
-- [ ] **A Product can read the deployed contract from inside the app** — blocked until now by a
-      BigInt serialization throw disguised as a hang, not by anything on the network
-- [ ] **…through the host's own provider** — `chainHead_v1_call` is not refused, but driving it needs
-      PAPI's subscription lifecycle, which this probe deliberately does not implement
-- [ ] **A burner-signed EIP-712 payload survives on-chain `ecrecover`** — proven twice from Node,
-      over eth-rpc and natively; the in-app half sits behind the same fixed bug
+**Gate** — all six pass, suite 2.0.0, Pixel 10 Pro XL:
+- [x] `deriveEntropy` is deterministic in a published bundle — same burner across a full app restart
+- [x] The Ring VRF alias is stable per product — `getProductAccountAlias`, stable across a restart
+- [x] `getProductAccount` yields distinct keys per index
+- [x] A Product can read the deployed contract from inside the app — 3 of 4 paths
+- [x] …through the host's own provider — `getRawClient` + `createContractFromClient`, 7 ms warm
+- [x] A burner-signed EIP-712 payload survives on-chain `ecrecover` — **via the host-routed path**
 
 **Risk** — highest in the plan, which is why it is first and small. **Parallel with:** Phase 2.
 
