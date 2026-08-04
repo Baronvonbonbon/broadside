@@ -27,6 +27,8 @@ export const DOT_NAME = `${PRODUCT_ID}.dot`;
 // a chain a devnet build does not carry, and createApp throws.
 export const CLOUD_ENV = "devnet";
 
+// 1.8.0 — the baseline persists per check rather than only on a clean finish;
+// chainHead probes cost 4s not 12s, cutting ~16s of dead time from every run.
 // 1.7.0 — copy/paste export, because Blob downloads silently do nothing in the
 // Polkadot App WebView and the report had no other way out.
 // 1.6.0 — breadcrumbs carried into timeout findings so a stall names the await
@@ -42,7 +44,7 @@ export const CLOUD_ENV = "devnet";
 // 1.1.0 — sweeps the chains the host actually carries instead of assuming
 // truapi's two; stops gate 5 inheriting the host transport's failure; reports
 // getUserId as a privacy hazard rather than a capability.
-export const SUITE_VERSION = "1.7.0";
+export const SUITE_VERSION = "1.8.0";
 
 export const SOURCE_URL = "https://github.com/Baronvonbonbon/broadside";
 

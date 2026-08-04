@@ -60,7 +60,10 @@ export class HostRpc {
     return rpc;
   }
 
-  async call(method: string, params: unknown[] = []): Promise<RpcResult> {
+  /** `timeoutMs` overrides the connection default — some probes know in advance
+   *  that a method will not answer and should not spend twelve seconds proving
+   *  it again on every run. */
+  async call(method: string, params: unknown[] = [], timeoutMs = this.timeoutMs): Promise<RpcResult> {
     const id = this.#nextId++;
     const t0 = performance.now();
     const conn = this.#conn;
@@ -69,8 +72,8 @@ export class HostRpc {
     return new Promise<RpcResult>((resolve) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
-        resolve({ ok: false, error: { message: `no response in ${this.timeoutMs} ms` }, ms: Math.round(performance.now() - t0) });
-      }, this.timeoutMs);
+        resolve({ ok: false, error: { message: `no response in ${timeoutMs} ms` }, ms: Math.round(performance.now() - t0) });
+      }, timeoutMs);
 
       this.#pending.set(id, (m) => {
         clearTimeout(timer);

@@ -603,7 +603,7 @@ const hostMethods: Check = {
   id: "chain.hostMethods",
   title: "Which RPC methods does the host allow?",
   why: "rpc_methods returned nothing and eth_chainId came back 'not supported by the host', so the transport is an allowlist. Whether a runtime-call method is on it decides whether a contract can be read through the host at all, or only through an external endpoint.",
-  gates: [],
+  gates: ["hostRouted"],
   needs: ["chain.hostTransport"],
   timeoutMs: 90_000,
   async run(ctx) {
@@ -642,7 +642,12 @@ const hostMethods: Check = {
     const detail: Record<string, string> = {};
 
     for (const [method, params] of candidates) {
-      const r = await rpc.call(method, params);
+      // chainHead_* is known not to answer an id-correlated request — its result
+      // comes back as a notification on a follow subscription. Re-proving that
+      // at twelve seconds a time cost 24 s of every run and made the suite look
+      // wedged long before anything actually was.
+      const budget = method.startsWith("chainHead_") ? 4_000 : 12_000;
+      const r = await rpc.call(method, params, budget);
       if (r.ok) {
         allowed.push(method);
         detail[method] = `ok (${r.ms} ms)`;

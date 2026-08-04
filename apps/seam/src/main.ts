@@ -12,7 +12,7 @@ import { isInsideContainerSync } from "@parity/product-sdk";
 import { DOT_NAME, PRODUCT_ID, SOURCE_URL } from "../product.mjs";
 import { build, download, type Report } from "./report";
 import { runAll } from "./run";
-import { extend, openStore, type Baseline } from "./memory";
+import { extend, openStore } from "./memory";
 import type { Finding, Status } from "./types";
 import "./style.css";
 
@@ -75,7 +75,7 @@ async function start(): Promise<void> {
   // lived behind a completed run — so the most useful data in the suite was the
   // data it refused to hand over.
   const partial: Finding[] = [];
-  out.replaceChildren(exportRow(() => partial), list);
+  out.replaceChildren(exportRow(() => partial, store.where, baseline?.recordedAt ?? null), list);
 
   // A row for the check that is *about* to run, replaced by its result when it
   // settles. Without it the only thing on screen during a stall is a count of
@@ -84,6 +84,34 @@ async function start(): Promise<void> {
   let ticker: number | undefined;
 
   const shared: Record<string, unknown> = { baseline };
+  const buildId = typeof __BUILD_ID__ === "string" ? __BUILD_ID__ : "dev";
+
+  /**
+   * Persist what has been observed so far.
+   *
+   * This used to run once, after the last check. Every run since has wedged
+   * before reaching it, so the alias baseline was never written and
+   * alias.crossSession reported "first run — baseline recorded" on every single
+   * run, forever. A cross-session check whose baseline only persists on a clean
+   * finish cannot answer a question about restarts on a suite that does not
+   * finish.
+   */
+  const persist = async () => {
+    await store.write(
+      extend(
+        baseline,
+        {
+          entropyFingerprint: (shared.burner as { entropyFingerprint?: string } | undefined)?.entropyFingerprint,
+          burnerAddress: (shared.burner as { address?: string } | undefined)?.address,
+          anonymousAlias: shared.alias as string | undefined,
+          productAccount0: shared.productAccount0 as string | undefined,
+          userId: shared.userId as string | undefined,
+        },
+        buildId,
+      ),
+    );
+  };
+
   const findings = await runAll({
     shared,
     onStart(check, i, total) {
@@ -112,6 +140,9 @@ async function start(): Promise<void> {
     onProgress(f) {
       clearInterval(ticker);
       partial.push(f);
+      // Fire and forget: a failed write must not stall the run, and the next
+      // check's completion will try again anyway.
+      void persist().catch(() => {});
       const row = renderFinding(f);
       if (pending) pending.replaceWith(row);
       else list.append(row);
@@ -121,17 +152,7 @@ async function start(): Promise<void> {
   });
   clearInterval(ticker);
 
-  // Record before rendering, so a first run leaves a baseline even if the
-  // reader closes the app the moment it finishes.
-  const observed: Partial<Baseline> = {
-    entropyFingerprint: (shared.burner as { entropyFingerprint?: string } | undefined)?.entropyFingerprint,
-    burnerAddress: (shared.burner as { address?: string } | undefined)?.address,
-    anonymousAlias: shared.alias as string | undefined,
-    productAccount0: shared.productAccount0 as string | undefined,
-    userId: shared.userId as string | undefined,
-  };
-  const buildId = typeof __BUILD_ID__ === "string" ? __BUILD_ID__ : "dev";
-  await store.write(extend(baseline, observed, buildId));
+  await persist();
 
   report = build(findings, {
     userAgent: navigator.userAgent,
@@ -163,7 +184,7 @@ function render(r: Report, findings: Finding[]): void {
 
   // The same export row as mid-run, so there is one way to get data out and it
   // is the one that has been exercised on every wedged run.
-  const actions = exportRow(() => findings);
+  const actions = exportRow(() => findings, r.surface.baselineStore, r.surface.baselineRecordedAt);
 
   const caveats = el("section", { class: "caveats" });
   if (r.caveats.length) {
@@ -195,12 +216,12 @@ function render(r: Report, findings: Finding[]): void {
  * and a finished one: the click reads the buffer at the moment it happens,
  * which is what makes a *wedged* run exportable.
  */
-function exportRow(get: () => Finding[]): HTMLElement {
+function exportRow(get: () => Finding[], baselineStore = "unknown", baselineRecordedAt: string | null = null): HTMLElement {
   const surface = {
     userAgent: navigator.userAgent,
     inContainer: isInsideContainerSync(),
-    baselineStore: "unknown",
-    baselineRecordedAt: null,
+    baselineStore,
+    baselineRecordedAt,
   };
   const text = () => JSON.stringify(report ?? build(get(), surface), null, 2);
 
