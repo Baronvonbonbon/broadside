@@ -126,31 +126,46 @@ Note the naming trap again: cdm's `paseo` preset points `assethubUrl` at
 `wss://paseo-asset-hub-next-rpc.polkadot.io` — Paseo *Next* — while its `devnet` preset is the chain
 everything here actually uses. Same inversion as `devnet-asset-hub` in the descriptors package.
 
-**The registry is not an Ethereum-ABI contract.** Ten candidate view signatures all reverted, which
-alone proves nothing, so a control settled it:
+**Correction — the registry *is* Ethereum-ABI.** An earlier note here claimed it was not, on the
+strength of ten candidate view signatures reverting plus a control showing `BroadsideRouter` answers
+`owner()` while the registry reverts on it. That control was weaker than it looked: it proves the
+registry has no `owner()`, which every contract lacking that function also does. Reverting on a guess
+is not evidence about encoding.
 
-| call | `BroadsideRouter` (known EVM ABI) | the registry |
-|---|---|---|
-| `owner()` — `0x8da5cb5b` | returns `0x…26194fE2` | reverts |
-| `0xdeadbeef` (garbage) | reverts | reverts |
+What settled it was watching the real traffic. `cdm install` was pointed at a logging WebSocket proxy
+in front of the node, and the request it makes is an ordinary `ReviveApi_call` carrying ABI calldata:
 
-Our router answers a real selector and rejects a fake one. The registry rejects both, identically —
-so it is an ink!/PVM-native contract taking SCALE-encoded messages with blake2-derived selectors, not
-4-byte Ethereum ones. `ethers` cannot address it and neither can guesswork.
+```
+origin        modlpy/revive…      ← the pallet's own account, as a free read origin
+dest          0x59b0245778917af55224e5f8fb55f7f8d452619f
+value / gas   0 / None / None
+selector      0x223c3bb9
+args          ABI string, e.g. "@polkadot/reputation"
+```
 
-That is consistent with what `cdm` is: `cdm setup` installs **`cargo-pvm-contract`**, and `cdm deploy`
-takes `--features <cargo features>`. It builds Rust contracts and registers what it built. Broadside's
-are Solidity, compiled by `solc` + `resolc` and deployed by `deploy-spine.mjs`, so the tool's happy
-path does not cover them.
+So the read path is `0x223c3bb9(string)`, reached exactly the way `packages/client` reaches
+`BroadsideSeam`. The earlier probes very likely *did* hit a real function and reverted because the
+name was not registered — `cdm install` gets `Contract "…" not found in registry` against this same
+registry, which is the same condition seen from the other side.
 
-**What unblocks it**, in preference order:
+The selector does not match any of 104 name/arg combinations tried, so the function's *name* is still
+unknown. That does not matter for reading — a selector is a selector — but it does mean the **write**
+side cannot be derived by analogy.
 
-1. The ContractRegistry's **ink! metadata** (`.contract` / metadata JSON). With that, the call is one
-   PAPI `createContractRuntime` away — the same path `packages/client` will use, already proven in
-   Phase 1's read matrix.
-2. A `cdm` route for registering an **already-deployed address**. Nothing in `--help` exposes one;
-   `cdm setup` fetches a binary that may.
+**What unblocks it**, in preference order:**What unblocks it**, in preference order:
+
+1. **The ContractRegistry's ABI or source.** With the register function's signature, the call is one
+   `eth_sendTransaction` away — the same shape as the fifteen `BroadsideRouter.register` calls that
+   already succeeded, and `cargo pvm-contract call --dry-run` can rehearse it before it is sent.
+2. **Capture the write selector the same way the read one was captured** — scaffold a throwaway
+   contract with `cdm template`, run `cdm deploy` through the proxy, and read the calldata. This
+   works, and it costs a permanent junk entry in an append-only registry to learn one selector. That
+   is a deliberate trade, not a free one, and is left as a decision rather than taken.
 3. Asking Parity what the intended flow is for a Solidity contract deployed outside cdm.
+
+**The toolchain is now installed** — `cdm setup` reports all seven dependencies ready, including
+`cargo-pvm-contract`, whose `call --contract <h160> --data <hex> --dry-run` is the safe rehearsal for
+whichever signature turns out to be right.
 
 Everything else about the spine works without this. The registry entry is how *other people's* tools
 discover `@broadside/hub`; Broadside's own widget, relay and indexer resolve through
