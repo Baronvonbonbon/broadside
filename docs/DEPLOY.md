@@ -102,10 +102,59 @@ source — which is what missed `BroadsideRouter`'s three arguments and `Broadsi
 it records every address before the next deploy begins, so a run that dies halfway is re-run rather
 than restarted; that property was used twice.
 
-**Not yet done: the `cdm` registration.** Broadside publishes exactly ONE name — `@broadside/hub`,
-pointing at `BroadsideRouter` — because the cdm registry is append-only and an entry "cannot be
-deleted, renamed or reassigned". Everything else resolves through the router's own re-pointable map.
-That step is deliberate and separate, and has not been taken.
+### The `cdm` registration — blocked, and what is known
+
+Broadside publishes exactly ONE name — `@broadside/hub` → `BroadsideRouter` — because the cdm
+registry is append-only and an entry "cannot be deleted, renamed or reassigned". Everything else
+resolves through the router's own re-pointable map.
+
+**It has not been done, because the call cannot yet be constructed correctly.** Registering a guess
+into an append-only registry is the one mistake in this phase with no undo, so what follows is the
+groundwork rather than the act.
+
+**The registry on our chain is `0x59b0245778917af55224e5f8fb55f7f8d452619f`** — 71,639 bytes of code
+on 420420417. Established by checking, not by reading a preset name: `@polkadot-community-foundation/cdm-cli`
+ships three registry addresses, and the other two have **no code on this chain at all**.
+
+| cdm preset | registry | code on 420420417 |
+|---|---|---|
+| `devnet`, `paseo-next` | `0x59b02457…` | **71,639 bytes** |
+| `paseo`, `paseo-v2` | `0x7671a84f…` | none |
+| `w3s` | `0xa5747e60…` | none |
+
+Note the naming trap again: cdm's `paseo` preset points `assethubUrl` at
+`wss://paseo-asset-hub-next-rpc.polkadot.io` — Paseo *Next* — while its `devnet` preset is the chain
+everything here actually uses. Same inversion as `devnet-asset-hub` in the descriptors package.
+
+**The registry is not an Ethereum-ABI contract.** Ten candidate view signatures all reverted, which
+alone proves nothing, so a control settled it:
+
+| call | `BroadsideRouter` (known EVM ABI) | the registry |
+|---|---|---|
+| `owner()` — `0x8da5cb5b` | returns `0x…26194fE2` | reverts |
+| `0xdeadbeef` (garbage) | reverts | reverts |
+
+Our router answers a real selector and rejects a fake one. The registry rejects both, identically —
+so it is an ink!/PVM-native contract taking SCALE-encoded messages with blake2-derived selectors, not
+4-byte Ethereum ones. `ethers` cannot address it and neither can guesswork.
+
+That is consistent with what `cdm` is: `cdm setup` installs **`cargo-pvm-contract`**, and `cdm deploy`
+takes `--features <cargo features>`. It builds Rust contracts and registers what it built. Broadside's
+are Solidity, compiled by `solc` + `resolc` and deployed by `deploy-spine.mjs`, so the tool's happy
+path does not cover them.
+
+**What unblocks it**, in preference order:
+
+1. The ContractRegistry's **ink! metadata** (`.contract` / metadata JSON). With that, the call is one
+   PAPI `createContractRuntime` away — the same path `packages/client` will use, already proven in
+   Phase 1's read matrix.
+2. A `cdm` route for registering an **already-deployed address**. Nothing in `--help` exposes one;
+   `cdm setup` fetches a binary that may.
+3. Asking Parity what the intended flow is for a Solidity contract deployed outside cdm.
+
+Everything else about the spine works without this. The registry entry is how *other people's* tools
+discover `@broadside/hub`; Broadside's own widget, relay and indexer resolve through
+`BroadsideRouter` at `0x4712c1BB…`, which is live and answering.
 
 ## Publishing
 
