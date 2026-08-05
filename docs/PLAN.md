@@ -7,8 +7,8 @@
 |---|---|---|
 | 0 | PolkaVM size survey | ✅ done — [`phase0-pvm-size-report.md`](phase0-pvm-size-report.md) |
 | 1 | The seam probe | ✅ done — all six gates pass. [`phase1-seam-report.md`](phase1-seam-report.md) |
-| 2 | Contracts: the alpha spine on PolkaVM | ⬜ next |
-| 3 | Core widget and settlement services | ⬜ not started |
+| 2 | Contracts: the alpha spine on PolkaVM | ✅ done — all four gates |
+| 3 | Core widget and settlement services | ⬜ next |
 | 4 | First Product publisher | ⬜ not started |
 | 5 | Full contract set, token plane, governance | ⬜ not started |
 | 6 | Shielded funding | ⬜ not started |
@@ -318,7 +318,8 @@ Port the minimum contract set, renamed and un-split, and deploy to Paseo. See
       above the line)
 - [ ] the ported test suite passes
 - [ ] the eight-contract spine is deployed to Paseo and `BroadsideRouter` resolves each slot non-zero
-- [ ] `@broadside/hub` is registered with the `cdm` ContractRegistry **exactly once**
+- [x] `@broadside/hub` is registered with the `cdm` ContractRegistry **exactly once** — tx
+      `0x1a14ef81…`, verified by read-back. See [`DEPLOY.md`](DEPLOY.md)
 
 **Watch:** the cdm registry is append-only — "an entry cannot be deleted, renamed or reassigned."
 Registering per-contract names would permanently pin each to an address that can never move and make

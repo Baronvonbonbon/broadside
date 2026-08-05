@@ -102,76 +102,63 @@ source — which is what missed `BroadsideRouter`'s three arguments and `Broadsi
 it records every address before the next deploy begins, so a run that dies halfway is re-run rather
 than restarted; that property was used twice.
 
-### The `cdm` registration — blocked, and what is known
+### 2026-08-04 — `@broadside/hub` registered with cdm
 
-Broadside publishes exactly ONE name — `@broadside/hub` → `BroadsideRouter` — because the cdm
-registry is append-only and an entry "cannot be deleted, renamed or reassigned". Everything else
-resolves through the router's own re-pointable map.
+| | |
+|---|---|
+| Name | `@broadside/hub` → `BroadsideRouter` `0x4712c1BB0394Ec22f3a79e0e5c6d4Ba494edBd57` |
+| Registry | `0x59b0245778917af55224e5f8fb55f7f8d452619f` (chain 420420417) |
+| Tx | `0x1a14ef812f7a0a2d7cd2b73aa4c18b53ff28271e6cf5441144e56c43f62d410f` @ block 11826749 |
+| Gas | 16,658 |
+| Owner | `0x26194fE2e00A837b2a3f4e92A09E835AbB3DCEE3` |
+| Verified | `getAddress("@broadside/hub")` → `present=true, 0x4712c1BB…` |
 
-**It has not been done, because the call cannot yet be constructed correctly.** Registering a guess
-into an append-only registry is the one mistake in this phase with no undo, so what follows is the
-groundwork rather than the act.
+**One name, deliberately.** cdm is append-only — an entry "cannot be deleted, renamed or reassigned" —
+so registering all ~25 contracts individually would pin each to an address that can never move and
+make the upgrade ladder impossible. Everything else resolves through `BroadsideRouter`'s own map,
+which governance can re-point. Versions *are* appendable per name (`publishLatest` adds one), so a
+later version can carry a real metadata URI once ABIs are published to Bulletin; version 0 carries the
+repo URL.
 
-**The registry on our chain is `0x59b0245778917af55224e5f8fb55f7f8d452619f`** — 71,639 bytes of code
-on 420420417. Established by checking, not by reading a preset name: `@polkadot-community-foundation/cdm-cli`
-ships three registry addresses, and the other two have **no code on this chain at all**.
+#### How the interface was found, since none of it is documented for Solidity
 
-| cdm preset | registry | code on 420420417 |
-|---|---|---|
-| `devnet`, `paseo-next` | `0x59b02457…` | **71,639 bytes** |
-| `paseo`, `paseo-v2` | `0x7671a84f…` | none |
-| `w3s` | `0xa5747e60…` | none |
+Three wrong turns are worth recording, because each looked like an answer.
 
-Note the naming trap again: cdm's `paseo` preset points `assethubUrl` at
-`wss://paseo-asset-hub-next-rpc.polkadot.io` — Paseo *Next* — while its `devnet` preset is the chain
-everything here actually uses. Same inversion as `devnet-asset-hub` in the descriptors package.
+**"The registry is not an Ethereum-ABI contract."** Recorded here earlier, on ten candidate
+signatures reverting plus a control showing `BroadsideRouter` answers `owner()` while the registry
+does not. That control proves only that the registry lacks `owner()` — as does every contract without
+that function. It was an inference presented as a measurement, and it was wrong.
 
-**Correction — the registry *is* Ethereum-ABI.** An earlier note here claimed it was not, on the
-strength of ten candidate view signatures reverting plus a control showing `BroadsideRouter` answers
-`owner()` while the registry reverts on it. That control was weaker than it looked: it proves the
-registry has no `owner()`, which every contract lacking that function also does. Reverting on a guess
-is not evidence about encoding.
+**Guessing function names.** 104 name/argument combinations, no match. The read selector turned out to
+be `getVersionCount(string)` — a name nobody would guess first, because the natural question is "what
+address" and cdm's first question is "does this exist at all".
 
-What settled it was watching the real traffic. `cdm install` was pointed at a logging WebSocket proxy
-in front of the node, and the request it makes is an ordinary `ReviveApi_call` carrying ABI calldata:
+**What actually worked** was watching the traffic. `cdm install` was pointed at a logging WebSocket
+proxy in front of the node; the request is a plain `ReviveApi_call` carrying ABI calldata with origin
+`modlpy/revive` — the pallet's own account, used as a free read origin — selector `0x223c3bb9`, one
+ABI string. That selector is `getVersionCount(string)`, which then identified the contract precisely
+enough to find its ABI at `paritytech/contract-dependency-manager`,
+`src/lib/contracts/src/abi/registry.ts`. **The whole detour was avoidable**: the repo is public and
+`gh api` reaches it. Look for the source before reverse-engineering the wire.
 
-```
-origin        modlpy/revive…      ← the pallet's own account, as a free read origin
-dest          0x59b0245778917af55224e5f8fb55f7f8d452619f
-value / gas   0 / None / None
-selector      0x223c3bb9
-args          ABI string, e.g. "@polkadot/reputation"
-```
+Registration is normally declarative — a NatSpec tag, `/// @custom:cdm @example/counter-a`, which
+`cdm deploy` reads. That path builds and deploys the contract too, so it does not fit contracts
+already deployed by `deploy-spine.mjs`; calling `publishLatest` directly is the equivalent.
 
-So the read path is `0x223c3bb9(string)`, reached exactly the way `packages/client` reaches
-`BroadsideSeam`. The earlier probes very likely *did* hit a real function and reverted because the
-name was not registered — `cdm install` gets `Contract "…" not found in registry` against this same
-registry, which is the same condition seen from the other side.
+#### Two decoding traps in the read-back
 
-The selector does not match any of 104 name/arg combinations tried, so the function's *name* is still
-unknown. That does not matter for reading — a selector is a selector — but it does mean the **write**
-side cannot be derived by analogy.
+Both produced confident, wrong output before being caught, and both are worth knowing before anyone
+reads this registry again.
 
-**What unblocks it**, in preference order:**What unblocks it**, in preference order:
+`Contract.getAddress()` is a **built-in ethers v6 method**. `contract.getAddress(name)` silently
+returns the *contract's own address* instead of calling the ABI function of that name — which read
+back as the registry pointing at itself. Encode through an `Interface` explicitly.
 
-1. **The ContractRegistry's ABI or source.** With the register function's signature, the call is one
-   `eth_sendTransaction` away — the same shape as the fifteen `BroadsideRouter.register` calls that
-   already succeeded, and `cargo pvm-contract call --dry-run` can rehearse it before it is sent.
-2. **Capture the write selector the same way the read one was captured** — scaffold a throwaway
-   contract with `cdm template`, run `cdm deploy` through the proxy, and read the calldata. This
-   works, and it costs a permanent junk entry in an append-only registry to learn one selector. That
-   is a deliberate trade, not a free one, and is left as a decision rather than taken.
-3. Asking Parity what the intended flow is for a Solidity contract deployed outside cdm.
+The getters return a Rust `Option<T>` as a **two-value tuple**, `(bool present, T value)`. Decoding
+`getAddress` as a bare `address` yields `0x…0001` — the `true` flag read as the payload. Versions are
+also **zero-indexed**: the current entry is version 0, not 1.
 
-**The toolchain is now installed** — `cdm setup` reports all seven dependencies ready, including
-`cargo-pvm-contract`, whose `call --contract <h160> --data <hex> --dry-run` is the safe rehearsal for
-whichever signature turns out to be right.
-
-Everything else about the spine works without this. The registry entry is how *other people's* tools
-discover `@broadside/hub`; Broadside's own widget, relay and indexer resolve through
-`BroadsideRouter` at `0x4712c1BB…`, which is live and answering.
-
-## Publishing
+## Publishing## Publishing
 
 ```bash
 pnpm --filter @broadside/seam build
